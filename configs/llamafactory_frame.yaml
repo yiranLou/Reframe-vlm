@@ -1,0 +1,42 @@
+### LLaMA-Factory config for frame-conditioned LoRA
+### Uses frame special tokens in the data
+
+### model
+model_name_or_path: models/qwen25-vl-7b
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_target: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
+# Resize token embeddings for frame special tokens
+additional_special_tokens: "<frame_camera>,<frame_person>,<frame_object>,<frame_world>"
+
+### dataset
+dataset: reframe_train
+dataset_dir: data/llamafactory
+template: qwen2_vl
+cutoff_len: 2048
+
+### output
+output_dir: checkpoints/llamafactory_frame
+logging_steps: 10
+save_steps: 500
+save_total_limit: 2
+overwrite_output_dir: true
+
+### train
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 32
+learning_rate: 2.0e-5
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+gradient_checkpointing: true
+
+### eval
+per_device_eval_batch_size: 4

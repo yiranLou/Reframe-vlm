@@ -1,0 +1,23 @@
+# Core
+torch>=2.4.0
+torchvision>=0.19.0
+transformers>=4.46.0
+peft>=0.13.0
+accelerate>=0.34.0
+deepspeed>=0.15.0
+
+# Qwen2.5-VL
+qwen-vl-utils
+
+# Data & logging
+datasets
+wandb
+pillow
+tqdm
+pyyaml
+
+# Eval (optional, for fast inference)
+# vllm>=0.6.0
+
+# Flash attention (install separately)
+# pip install flash-attn --no-build-isolation

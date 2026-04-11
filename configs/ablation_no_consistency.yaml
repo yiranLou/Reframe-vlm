@@ -1,0 +1,35 @@
+# Ablation: remove consistency loss, keep frame tokens
+
+mode: frame
+model_path: models/qwen25-vl-7b
+train_data: data/processed/train.jsonl
+output_dir: checkpoints/ablation_no_consistency
+
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+
+use_frame_tokens: true
+
+# KEY CHANGE: no consistency loss (use frame mode, not full)
+view_permutation: true
+view_permutation_prob: 0.5
+
+num_epochs: 3
+batch_size: 2
+gradient_accumulation: 32
+learning_rate: 2.0e-5
+scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_length: 2048
+bf16: true
+gradient_checkpointing: true
+num_workers: 4
+
+logging_steps: 10
+save_strategy: epoch
+save_total_limit: 2
+report_to: wandb
+run_name: ablation_no_consistency
+seed: 42

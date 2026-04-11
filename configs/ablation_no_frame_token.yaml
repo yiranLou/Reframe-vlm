@@ -1,0 +1,39 @@
+# Ablation: remove frame tokens, keep consistency loss
+# Tests: is the frame token important, or just the consistency loss?
+
+mode: full
+model_path: models/qwen25-vl-7b
+train_data: data/processed/train.jsonl
+consistency_pairs: data/processed/consistency_pairs.jsonl
+output_dir: checkpoints/ablation_no_frame_token
+
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+
+# KEY CHANGE: no frame tokens
+use_frame_tokens: false
+
+lambda_consistency: 0.1
+canonical_dim: 64
+view_permutation: true
+view_permutation_prob: 0.5
+
+num_epochs: 3
+batch_size: 2
+gradient_accumulation: 32
+learning_rate: 2.0e-5
+scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_length: 2048
+bf16: true
+gradient_checkpointing: true
+num_workers: 4
+
+logging_steps: 10
+save_strategy: epoch
+save_total_limit: 2
+report_to: wandb
+run_name: ablation_no_frame_token
+seed: 42
