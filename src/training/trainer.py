@@ -1,11 +1,11 @@
 """
 Custom trainer for ReFrame-VLM.
 
-Extends HuggingFace Trainer to handle:
-1. Frame type IDs passed to model
-2. Consistency loss from paired samples
-3. Mixed batches (single + paired samples)
-4. Logging of individual loss components
+Extends HuggingFace Trainer to:
+1. Pass frame_type_ids to the model forward pass.
+2. Compute consistency loss from paired-sample relation logits.
+3. Route projection through the model's registered canonical_proj module.
+4. Log L_consistency alongside L_qa.
 """
 
 import torch
@@ -15,37 +15,29 @@ from .losses import ReFrameLoss
 
 class ReFrameTrainer(Trainer):
     """
-    Custom trainer that adds consistency loss to the standard HF training loop.
+    Trainer that composes L_qa (from model) with L_consistency (pair-wise).
 
-    The model's forward pass returns:
-    - loss: standard L_qa (cross-entropy)
-    - relation_logits: for consistency loss
-
-    We compute the combined loss here.
+    The canonical projection lives on the model so that:
+      - parameters are included in the optimizer automatically
+      - tensors are on the right device/dtype
+      - weights are saved with the adapter checkpoint
     """
 
     def __init__(self, *args, lambda_consistency=0.1, **kwargs):
         super().__init__(*args, **kwargs)
         self.reframe_loss = ReFrameLoss(lambda_consistency=lambda_consistency)
-        self._consistency_loss_sum = 0.0
-        self._consistency_loss_count = 0
+        self._consist_sum = 0.0
+        self._consist_count = 0
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        """
-        Override compute_loss to add consistency loss.
-        """
-        # Extract custom fields before passing to model
         frame_type_ids = inputs.pop("frame_type_ids", None)
         pair_indices = inputs.pop("pair_indices", None)
 
-        # Determine if we need relation logits
         need_consistency = (
             pair_indices is not None
             and len(pair_indices) > 0
             and self.reframe_loss.lambda_consistency > 0
         )
-
-        # Forward pass
         if need_consistency:
             inputs["output_hidden_states"] = True
 
@@ -54,41 +46,61 @@ class ReFrameTrainer(Trainer):
         qa_loss = outputs["loss"]
         relation_logits = outputs.get("relation_logits")
 
-        # Compute combined loss
+        # The canonical projection module is a submodule of the ReFrameVLM.
+        # Under DDP / Accelerate, model may be wrapped; unwrap via .module.
+        base = model.module if hasattr(model, "module") else model
+        canonical_proj = getattr(base, "canonical_proj", None)
+
         loss_dict = self.reframe_loss(
             qa_loss=qa_loss,
             relation_logits=relation_logits,
             pair_indices=pair_indices,
             frame_type_ids=frame_type_ids,
+            canonical_proj=canonical_proj,
         )
 
         total_loss = loss_dict["total_loss"]
-
-        # Track consistency loss for logging
-        if loss_dict["consistency_loss"].item() > 0:
-            self._consistency_loss_sum += loss_dict["consistency_loss"].item()
-            self._consistency_loss_count += 1
+        c_val = loss_dict["consistency_loss"]
+        if isinstance(c_val, torch.Tensor) and c_val.item() > 0:
+            self._consist_sum += c_val.item()
+            self._consist_count += 1
 
         if return_outputs:
             return total_loss, outputs
         return total_loss
 
-    def log(self, logs):
-        """Add consistency loss to logs."""
-        if self._consistency_loss_count > 0:
-            avg_consist = (
-                self._consistency_loss_sum / self._consistency_loss_count
+    def log(self, logs, *args, **kwargs):
+        if self._consist_count > 0:
+            logs["consistency_loss"] = round(
+                self._consist_sum / self._consist_count, 6
             )
-            logs["consistency_loss"] = round(avg_consist, 6)
-            self._consistency_loss_sum = 0.0
-            self._consistency_loss_count = 0
-
-        super().log(logs)
+            self._consist_sum = 0.0
+            self._consist_count = 0
+        super().log(logs, *args, **kwargs)
 
 
 class BaselineTrainer(Trainer):
-    """
-    Standard trainer for baseline LoRA fine-tuning.
-    No frame tokens, no consistency loss.
-    """
-    pass
+    """Plain Trainer for baseline / frame-only modes (no consistency loss)."""
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        # Drop any auxiliary fields our collator may include but the base
+        # model / PEFT wrapper doesn't understand.
+        inputs.pop("pair_indices", None)
+        frame_type_ids = inputs.pop("frame_type_ids", None)
+
+        # If the model is ReFrameVLM (frame mode), it accepts frame_type_ids
+        # but currently doesn't use them in forward. Pass through when supported.
+        try:
+            outputs = model(**inputs, frame_type_ids=frame_type_ids)
+        except TypeError:
+            outputs = model(**inputs)
+
+        # ReFrameVLM returns a dict; PEFT-wrapped HF model returns ModelOutput.
+        if isinstance(outputs, dict):
+            loss = outputs["loss"]
+        else:
+            loss = outputs.loss
+
+        if return_outputs:
+            return loss, outputs
+        return loss

@@ -1,0 +1,29 @@
+# Large artifacts
+checkpoints/
+wandb/
+logs/
+models/
+
+# Raw + processed datasets (too large for git; regenerate with data/scripts/*)
+data/raw/
+data/processed/
+data/llamafactory/reframe_*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Junk from pip install typos
+=*
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Local env
+.env
+.envrc

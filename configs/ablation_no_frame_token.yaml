@@ -20,13 +20,13 @@ view_permutation: true
 view_permutation_prob: 0.5
 
 num_epochs: 3
-batch_size: 2
-gradient_accumulation: 32
+batch_size: 4
+gradient_accumulation: 16
 learning_rate: 2.0e-5
 scheduler: cosine
 warmup_ratio: 0.05
 weight_decay: 0.01
-max_length: 2048
+max_length: 512
 bf16: true
 gradient_checkpointing: true
 num_workers: 4

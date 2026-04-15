@@ -105,7 +105,12 @@ class ReFrameVLM(nn.Module):
             attn_implementation="flash_attention_2",
         )
 
-        self.hidden_dim = self.base_model.config.hidden_size
+        # Qwen2.5-VL has nested text_config; fall back to direct hidden_size
+        cfg = self.base_model.config
+        if hasattr(cfg, "text_config") and hasattr(cfg.text_config, "hidden_size"):
+            self.hidden_dim = cfg.text_config.hidden_size
+        else:
+            self.hidden_dim = cfg.hidden_size
         self.use_frame_tokens = use_frame_tokens
         self.use_relation_head = use_relation_head
 
@@ -123,16 +128,18 @@ class ReFrameVLM(nn.Module):
             lora_config = get_default_lora_config()
         self.base_model = get_peft_model(self.base_model, lora_config)
 
-        # Relation head for consistency loss
+        # Relation head for consistency loss.
+        # Cast to bf16 so the dtype matches the base model's hidden states
+        # (avoids a runtime error on the first matmul).
         if use_relation_head:
             self.relation_head = RelationHead(
                 hidden_dim=self.hidden_dim,
                 relation_dim=TOTAL_RELATION_DIM,
-            )
+            ).to(dtype=torch.bfloat16)
             self.canonical_proj = FrameCanonicalProjection(
                 relation_dim=TOTAL_RELATION_DIM,
                 canonical_dim=canonical_dim,
-            )
+            ).to(dtype=torch.bfloat16)
         else:
             self.relation_head = None
             self.canonical_proj = None
@@ -169,6 +176,12 @@ class ReFrameVLM(nn.Module):
         else:
             last_hidden = hidden_states[:, -1, :]
 
+        # Accelerator / Trainer may reset non-base modules to fp32 after
+        # Accelerator.prepare(). Align the input dtype at call time so the
+        # matmul inside RelationHead always sees matching dtypes.
+        rh_dtype = next(self.relation_head.parameters()).dtype
+        if last_hidden.dtype != rh_dtype:
+            last_hidden = last_hidden.to(rh_dtype)
         return self.relation_head(last_hidden)
 
     def get_canonical_projection(self, relation_logits, frame_type_ids):
@@ -223,6 +236,27 @@ class ReFrameVLM(nn.Module):
             result["hidden_states"] = outputs.hidden_states
 
         return result
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        """Proxy to base model for HF Trainer compatibility."""
+        return self.base_model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
+        )
+
+    def gradient_checkpointing_disable(self):
+        """Proxy to base model."""
+        return self.base_model.gradient_checkpointing_disable()
+
+    def enable_input_require_grads(self):
+        """Proxy to base model. Required for gradient checkpointing + LoRA."""
+        return self.base_model.enable_input_require_grads()
+
+    def save_pretrained(self, save_dir, **kwargs):
+        """Save the LoRA adapter (via PEFT) plus auxiliary modules."""
+        # Save PEFT adapter
+        self.base_model.save_pretrained(save_dir, **kwargs)
+        # Save auxiliary modules
+        self.save_auxiliary_modules(save_dir)
 
     def save_auxiliary_modules(self, save_dir):
         """Save non-LoRA trainable modules (relation head, projections)."""

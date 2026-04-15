@@ -1,0 +1,43 @@
+# Fair text-instruction baseline for P0-d.
+# Same recipe as train_baseline.yaml (naive LoRA SFT) but the collator
+# prepends a natural-language frame instruction to every question.
+# No <frame_*> special tokens are added to the vocabulary.
+#
+# This directly controls for "does the gain of Frame LoRA come from having
+# the frame-information channel, or specifically from a LEARNED frame token?"
+
+mode: baseline
+model_path: models/qwen25-vl-7b
+train_data: data/processed/train.jsonl
+output_dir: checkpoints/text_instruction_lora
+
+# Collator: inject natural-language instruction per sample based on frame_type
+use_frame_text_prompt: true
+
+# LoRA — identical to Frame LoRA for a clean comparison
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+
+# Training — identical to Frame LoRA (we can only afford 1 epoch, matching other rows)
+num_epochs: 1
+batch_size: 4
+gradient_accumulation: 16
+learning_rate: 2.0e-5
+scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_length: 768   # instructions are ~30-40 tokens so we give some headroom
+
+# Hardware
+bf16: true
+gradient_checkpointing: true
+num_workers: 4
+
+# Logging
+logging_steps: 10
+save_strategy: epoch
+save_total_limit: 1
+report_to: wandb
+run_name: reframe_text_instruction_lora
+seed: 42

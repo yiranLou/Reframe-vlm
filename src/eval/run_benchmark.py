@@ -22,27 +22,76 @@ import argparse
 import json
 import os
 import torch
+# Workaround for cuDNN initialization issues on some CUDA 12.x setups
+torch.backends.cudnn.enabled = False
 from tqdm import tqdm
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
 from peft import PeftModel
 
 
-def load_model(model_path, base_model_path=None):
+def load_model(model_path, base_model_path=None, use_frame_tokens=False):
     """
     Load model for evaluation.
-    If model_path is a LoRA checkpoint, loads base + adapter.
-    If model_path is a full model, loads directly.
+    Three cases:
+    1. LoRA adapter checkpoint (has adapter_config.json) - load base + adapter
+    2. Full ReFrameVLM checkpoint (has model.safetensors with double-wrapped state) - reconstruct
+    3. Full HF model - load directly
     """
-    # Check if it's a LoRA checkpoint
     adapter_config = os.path.join(model_path, "adapter_config.json")
+    full_safetensors = os.path.join(model_path, "model.safetensors")
+
+    # Detect ReFrameVLM full save (has double-wrapped state dict)
+    is_reframe_full_save = False
+    if os.path.exists(full_safetensors) and not os.path.exists(adapter_config):
+        from safetensors import safe_open
+        with safe_open(full_safetensors, framework="pt") as f:
+            first_keys = list(f.keys())[:5]
+        is_reframe_full_save = any("base_model.base_model" in k for k in first_keys)
+
+    if is_reframe_full_save:
+        if base_model_path is None:
+            base_model_path = "/workspace/models/qwen25-vl-7b"
+        print(f"Detected ReFrameVLM full save. Reconstructing from {model_path}")
+        # Build fresh ReFrameVLM with frame tokens (so tokenizer gets resized)
+        from src.model.reframe_model import ReFrameVLM, get_default_lora_config
+        wrapper = ReFrameVLM(
+            model_path=base_model_path,
+            lora_config=get_default_lora_config(),
+            use_frame_tokens=True,
+            use_relation_head=False,
+        )
+        # Load saved state into wrapper
+        from safetensors.torch import load_file
+        state_dict = load_file(full_safetensors)
+        # The keys in state_dict have "base_model." prefix matching wrapper.base_model.*
+        # Strip the wrapper-level "base_model." since we'll load into wrapper.base_model
+        stripped = {}
+        for k, v in state_dict.items():
+            if k.startswith("base_model."):
+                stripped[k[len("base_model."):]] = v
+            else:
+                stripped[k] = v
+        missing, unexpected = wrapper.base_model.load_state_dict(stripped, strict=False)
+        print(f"Loaded state. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+        if missing:
+            print(f"  Missing examples: {missing[:3]}")
+        if unexpected:
+            print(f"  Unexpected examples: {unexpected[:3]}")
+        # Move to GPU
+        wrapper = wrapper.cuda()
+        # Merge LoRA for inference speed
+        wrapper.base_model = wrapper.base_model.merge_and_unload()
+        model = wrapper.base_model
+        processor = wrapper.processor
+        model.eval()
+        return model, processor
+
     if os.path.exists(adapter_config):
         if base_model_path is None:
-            # Try to read base model from adapter config
             with open(adapter_config) as f:
                 cfg = json.load(f)
             base_model_path = cfg.get("base_model_name_or_path", model_path)
-
         print(f"Loading base model from {base_model_path}")
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             base_model_path,
@@ -68,8 +117,20 @@ def load_model(model_path, base_model_path=None):
     return model, processor
 
 
+MAX_IMAGES = 4  # Limit images per sample to control inference speed
+
+
+FRAME_TYPE_TO_TOKEN = {
+    "camera": "<frame_camera>",
+    "person": "<frame_person>",
+    "object": "<frame_object>",
+    "world": "<frame_world>",
+}
+
+
 def run_inference(model, processor, images, question, choices=None,
-                  frame_type=None, use_frame_prompt=False, max_new_tokens=64):
+                  frame_type=None, use_frame_prompt=False,
+                  use_frame_token=False, max_new_tokens=64):
     """
     Run single-sample inference.
 
@@ -77,15 +138,28 @@ def run_inference(model, processor, images, question, choices=None,
         images: list of image paths
         question: question string
         choices: optional list of answer choices
-        frame_type: optional frame type for prompt baseline
+        frame_type: optional frame type for prompt baseline / frame token
         use_frame_prompt: whether to add text frame prompt (baseline 2)
+        use_frame_token: whether to prepend learned <frame_*> special token (frame/full method)
     """
+    # Limit number of images to avoid slow multi-image inference
+    if len(images) > MAX_IMAGES:
+        # Evenly sample to preserve coverage
+        step = len(images) / MAX_IMAGES
+        images = [images[int(i * step)] for i in range(MAX_IMAGES)]
+
     content = []
     for img_path in images:
         content.append({"type": "image", "image": f"file://{img_path}"})
 
     # Build question text
     q_parts = []
+
+    # Frame special token (for frame-conditioned models)
+    if use_frame_token and frame_type:
+        token = FRAME_TYPE_TO_TOKEN.get(frame_type)
+        if token:
+            q_parts.append(token)
 
     if use_frame_prompt and frame_type:
         FRAME_PROMPTS = {
@@ -100,9 +174,14 @@ def run_inference(model, processor, images, question, choices=None,
 
     q_parts.append(question)
 
-    if choices:
+    # Avoid appending options twice: some benchmarks (MMSI, Ego3D) already
+    # embed "Options: ..." in the question text itself.
+    already_has_options = "Options:" in question or "options:" in question
+    if choices and not already_has_options:
         opts = ", ".join(str(c) for c in choices)
         q_parts.append(f"\nOptions: {opts}\nAnswer with the correct option only.")
+    elif choices and already_has_options:
+        q_parts.append("\nAnswer with the correct option letter only.")
     else:
         q_parts.append("\nAnswer concisely.")
 
@@ -131,57 +210,92 @@ def run_inference(model, processor, images, question, choices=None,
     return response.strip()
 
 
+import re as _re
+
+
+def _extract_first_number(s: str):
+    """Extract the first signed decimal number from a string, or None."""
+    m = _re.search(r"-?\d+(?:\.\d+)?", s)
+    return float(m.group(0)) if m else None
+
+
+def _first_letter(s: str):
+    """Return uppercase A-D if the string starts with a choice letter."""
+    s = s.strip()
+    if not s:
+        return None
+    m = _re.match(r"^\(?([A-Da-d])\b", s)
+    return m.group(1).upper() if m else None
+
+
 def match_answer(pred, gt, choices=None):
     """
     Match prediction against ground truth.
-    Handles multi-choice and open-ended answers.
+
+    Three cases:
+      1. Single-letter GT (MMSI / Ego3D MC): compare leading letter of pred
+         against GT letter.
+      2. Numeric GT (Ego3D distance): extract first number, accept within
+         10% relative error or 1.0 absolute.
+      3. Textual GT: loose substring / first-word match.
     """
-    pred_lower = pred.lower().strip()
-    gt_lower = gt.lower().strip()
+    if pred is None:
+        return False
+    pred_s = pred.strip()
+    gt_s = str(gt).strip()
+    pred_l = pred_s.lower()
+    gt_l = gt_s.lower()
 
-    # Exact match
-    if pred_lower == gt_lower:
+    # 1. Letter-only GT
+    if _re.fullmatch(r"[A-Da-d]", gt_s):
+        return _first_letter(pred_s) == gt_s.upper()
+
+    # 2. Numeric GT
+    if _re.fullmatch(r"-?\d+(?:\.\d+)?", gt_s):
+        gt_val = float(gt_s)
+        pred_val = _extract_first_number(pred_s)
+        if pred_val is None:
+            return False
+        abs_err = abs(pred_val - gt_val)
+        rel_err = abs_err / max(abs(gt_val), 1e-6)
+        return abs_err <= 1.0 or rel_err <= 0.10
+
+    # 3. Exact / substring textual match
+    if pred_l == gt_l or gt_l in pred_l:
         return True
 
-    # Check if prediction contains the ground truth
-    if gt_lower in pred_lower:
-        return True
-
-    # For multi-choice, check if prediction starts with the answer
     if choices:
-        # Try matching first word/letter
-        pred_first = pred_lower.split()[0] if pred_lower else ""
-        gt_first = gt_lower.split()[0] if gt_lower else ""
+        pred_first = pred_l.split()[0] if pred_l else ""
+        gt_first = gt_l.split()[0] if gt_l else ""
         if pred_first == gt_first:
             return True
-
-        # Check option letter matching (A, B, C, D)
+        # Option-letter aware match on full choice strings.
         for i, choice in enumerate(choices):
-            letter = chr(ord('A') + i)
-            if gt_lower == choice.lower():
-                if pred_lower.startswith(letter.lower()) or letter.lower() in pred_lower[:3]:
+            letter = chr(ord("A") + i)
+            if gt_l == str(choice).lower():
+                if pred_l.startswith(letter.lower()) or f" {letter.lower()} " in f" {pred_l[:5]} ":
                     return True
 
     return False
 
 
+BENCHMARK_DEFAULT_PATHS = {
+    "viewspatial": "data/processed/viewspatial_test.jsonl",
+    "mmsi":        "data/processed/mmsi_test.jsonl",
+    "ego3d":       "data/processed/ego3d_test.jsonl",
+}
+
+
 def load_benchmark_data(benchmark_name, data_dir=None):
-    """
-    Load benchmark data. Tries multiple locations.
-    """
+    """Load a unified-format JSONL benchmark file."""
     if data_dir:
         candidates = [data_dir]
     else:
-        candidates = [
-            f"data/processed/viewspatial_test.jsonl",
-            f"data/raw/viewspatial/test",
-            f"data/raw/mmsi-bench",
-            f"data/raw/ego3d-bench",
-        ]
+        default = BENCHMARK_DEFAULT_PATHS.get(benchmark_name)
+        candidates = [default] if default else []
 
-    # Try jsonl format first
     for path in candidates:
-        if os.path.exists(path) and path.endswith(".jsonl"):
+        if path and os.path.exists(path) and path.endswith(".jsonl"):
             samples = []
             with open(path, encoding="utf-8") as f:
                 for line in f:
@@ -191,24 +305,15 @@ def load_benchmark_data(benchmark_name, data_dir=None):
             print(f"Loaded {len(samples)} samples from {path}")
             return samples
 
-    # Try json format
-    for path in candidates:
-        json_path = path if path.endswith(".json") else path + ".json"
-        if os.path.exists(json_path):
-            with open(json_path, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                print(f"Loaded {len(data)} samples from {json_path}")
-                return data
-
     raise FileNotFoundError(
         f"Could not find benchmark data for '{benchmark_name}'. "
-        f"Tried: {candidates}"
+        f"Tried: {candidates}. "
+        f"Run data/scripts/convert_{benchmark_name}_bench.py first."
     )
 
 
 def evaluate(model, processor, benchmark_data, benchmark_name,
-             use_frame_prompt=False, max_new_tokens=64):
+             use_frame_prompt=False, use_frame_token=False, max_new_tokens=64):
     """Run evaluation on a benchmark."""
     correct = 0
     total = 0
@@ -222,6 +327,7 @@ def evaluate(model, processor, benchmark_data, benchmark_name,
             choices=sample.get("choices"),
             frame_type=sample.get("frame_type"),
             use_frame_prompt=use_frame_prompt,
+            use_frame_token=use_frame_token,
             max_new_tokens=max_new_tokens,
         )
 
@@ -268,6 +374,8 @@ def main():
                         help="Output directory (for --benchmark all)")
     parser.add_argument("--use_frame_prompt", action="store_true",
                         help="Use text frame prompt (baseline 2)")
+    parser.add_argument("--use_frame_token", action="store_true",
+                        help="Prepend learned <frame_*> special token (frame/full method)")
     parser.add_argument("--max_new_tokens", type=int, default=64)
     args = parser.parse_args()
 
@@ -285,6 +393,7 @@ def main():
         result = evaluate(
             model, processor, bench_data, bench_name,
             use_frame_prompt=args.use_frame_prompt,
+            use_frame_token=args.use_frame_token,
             max_new_tokens=args.max_new_tokens,
         )
 

@@ -16,6 +16,17 @@ from qwen_vl_utils import process_vision_info
 from src.model.reframe_model import FRAME_TYPE_TO_TOKEN
 
 
+# Natural-language frame instructions for the LoRA+text-instruction baseline.
+# Kept verbatim identical to the inference-time FRAME_PROMPTS in
+# src/eval/run_benchmark.py so that training and eval prompts match exactly.
+FRAME_TEXT_PROMPTS = {
+    "camera": "Answer the following spatial question from the camera's perspective (i.e., left/right refers to the viewer's left/right as seen in the image).",
+    "person": "Answer the following spatial question from the person's perspective in the scene (i.e., left/right refers to the person's own left/right, which may be opposite to the viewer's).",
+    "object": "Answer the following spatial question relative to the specified reference object's orientation.",
+    "world":  "Answer the following spatial question using absolute/world coordinates.",
+}
+
+
 # Qwen2.5-VL 的 assistant 起止标记
 # 实际 token 取决于 chat template，以下为常见格式
 ASSISTANT_START_TOKENS = ["<|im_start|>assistant", "<|assistant|>"]
@@ -32,10 +43,16 @@ class ReFrameCollator:
     3. Create labels: only compute loss on assistant response tokens
     """
 
-    def __init__(self, processor, max_length=2048, use_frame_tokens=True):
+    def __init__(self, processor, max_length=2048, use_frame_tokens=True,
+                 use_frame_text_prompt=False):
         self.processor = processor
         self.max_length = max_length
         self.use_frame_tokens = use_frame_tokens
+        # Mutually-exclusive fair-baseline mode: prepend a natural-language
+        # frame instruction instead of a learned <frame_*> special token.
+        self.use_frame_text_prompt = use_frame_text_prompt
+        assert not (use_frame_tokens and use_frame_text_prompt), \
+            "use_frame_tokens and use_frame_text_prompt are mutually exclusive"
 
         # 缓存 assistant 标记的 token ids 用于标签遮罩
         self._cache_special_token_ids()
@@ -58,13 +75,19 @@ class ReFrameCollator:
                 self.assistant_end_ids.append(ids)
 
     def _build_question(self, question, choices, frame_type):
-        """Build question string with optional frame token and choices."""
+        """Build question string with optional frame conditioning and choices."""
         parts = []
 
-        # Prepend frame token
+        # Prepend learned frame token (Frame LoRA / Full Method)
         if self.use_frame_tokens and frame_type:
             frame_token = FRAME_TYPE_TO_TOKEN.get(frame_type, "<frame_camera>")
             parts.append(frame_token)
+
+        # OR prepend natural-language frame instruction (fair text baseline)
+        if self.use_frame_text_prompt and frame_type:
+            instr = FRAME_TEXT_PROMPTS.get(frame_type, "")
+            if instr:
+                parts.append(instr)
 
         # Question
         parts.append(question)
@@ -251,8 +274,7 @@ class ReFrameCollator:
             text=all_texts,
             images=flat_images if flat_images else None,
             padding=True,
-            truncation=True,
-            max_length=self.max_length,
+            truncation=False,
             return_tensors="pt",
         )
 

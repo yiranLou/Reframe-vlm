@@ -94,11 +94,15 @@ class FrameCanonicalProjection(nn.Module):
         """
         batch_size = relation_logits.shape[0]
         device = relation_logits.device
-        dtype = relation_logits.dtype
+
+        # Match projection dtype to avoid fp32/bf16 mismatch under Accelerator.
+        proj_dtype = next(self.projections[self.FRAME_NAMES[0]].parameters()).dtype
+        if relation_logits.dtype != proj_dtype:
+            relation_logits = relation_logits.to(proj_dtype)
 
         projected = torch.zeros(
             batch_size, self.canonical_dim,
-            device=device, dtype=dtype
+            device=device, dtype=proj_dtype
         )
 
         for i, name in enumerate(self.FRAME_NAMES):

@@ -1,0 +1,43 @@
+{
+  "train": {
+    "label": "train",
+    "n_samples": 45809,
+    "n_scenes": 308,
+    "n_images": 3544
+  },
+  "test": {
+    "label": "viewspatial_test",
+    "n_samples": 5712,
+    "n_scenes": 279,
+    "n_images": 5250
+  },
+  "overlap": {
+    "scenes": 275,
+    "images": 0,
+    "question_image_pairs": 0,
+    "test_scene_overlap_fraction": 0.985663082437276
+  },
+  "shared_scenes_sample": [
+    "scene0011_00",
+    "scene0011_01",
+    "scene0019_01",
+    "scene0025_00",
+    "scene0025_01",
+    "scene0025_02",
+    "scene0030_00",
+    "scene0030_01",
+    "scene0030_02",
+    "scene0046_00",
+    "scene0046_01",
+    "scene0046_02",
+    "scene0050_00",
+    "scene0050_01",
+    "scene0050_02",
+    "scene0063_00",
+    "scene0064_00",
+    "scene0064_01",
+    "scene0077_00",
+    "scene0077_01"
+  ],
+  "verdict": "HIGH OVERLAP — paper must be framed as scene-adaptive training on held-out frames/views, not unseen-scene generalization."
+}

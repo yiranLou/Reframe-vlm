@@ -16,6 +16,8 @@ import argparse
 import os
 import yaml
 import torch
+# Workaround for cuDNN initialization issues on some CUDA 12.x setups
+torch.backends.cudnn.enabled = False
 from transformers import AutoProcessor, TrainingArguments
 from peft import LoraConfig, TaskType
 
@@ -38,11 +40,11 @@ def load_config(config_path):
 
 def build_training_args(config):
     """Build HuggingFace TrainingArguments from config."""
-    return TrainingArguments(
+    kwargs = dict(
         output_dir=config.get("output_dir", "checkpoints/default"),
         num_train_epochs=config.get("num_epochs", 3),
-        per_device_train_batch_size=config.get("batch_size", 2),
-        gradient_accumulation_steps=config.get("gradient_accumulation", 32),
+        per_device_train_batch_size=config.get("batch_size", 4),
+        gradient_accumulation_steps=config.get("gradient_accumulation", 16),
         learning_rate=config.get("learning_rate", 2e-5),
         lr_scheduler_type=config.get("scheduler", "cosine"),
         warmup_ratio=config.get("warmup_ratio", 0.05),
@@ -59,6 +61,9 @@ def build_training_args(config):
         seed=config.get("seed", 42),
         eval_strategy=config.get("eval_strategy", "no"),
     )
+    if "max_steps" in config:
+        kwargs["max_steps"] = config["max_steps"]
+    return TrainingArguments(**kwargs)
 
 
 def train_baseline(config):
@@ -99,6 +104,7 @@ def train_baseline(config):
         processor=processor,
         max_length=config.get("max_length", 2048),
         use_frame_tokens=False,
+        use_frame_text_prompt=config.get("use_frame_text_prompt", False),
     )
 
     training_args = build_training_args(config)
