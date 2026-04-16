@@ -169,6 +169,100 @@ def train_frame(config):
     print(f"Frame-conditioned model saved to {config.get('output_dir')}")
 
 
+def train_frame_gated(config):
+    """
+    Frame-Gated LoRA only (no special tokens, no consistency loss).
+
+    Plan B' clean comparison data point: parameter-space frame conditioning
+    in isolation, so we can attribute any improvement specifically to the
+    gate rather than to the input-side token or to a regulariser.
+    """
+    print("=== Training Mode: Frame-Gated LoRA (gate only) ===")
+    model_path = config["model_path"]
+
+    model = ReFrameVLM(
+        model_path=model_path,
+        lora_config=get_default_lora_config(
+            rank=config.get("lora_rank", 64),
+            alpha=config.get("lora_alpha", 128),
+            dropout=config.get("lora_dropout", 0.05),
+        ),
+        use_frame_tokens=False,
+        use_relation_head=False,
+        use_frame_gated_lora=True,
+    )
+
+    dataset = ReFrameDataset(
+        data_path=config["train_data"],
+        mode="qa",
+        view_permutation=False,
+    )
+
+    collator = ReFrameCollator(
+        processor=model.processor,
+        max_length=config.get("max_length", 512),
+        use_frame_tokens=False,
+        use_frame_text_prompt=False,
+    )
+
+    training_args = build_training_args(config)
+    trainer = BaselineTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=dataset,
+        data_collator=collator,
+    )
+    trainer.train()
+    trainer.save_model()
+    print(f"Frame-gated model saved to {config.get('output_dir')}")
+
+
+def train_token_gated(config):
+    """
+    Frame-Gated LoRA + learned frame tokens (combined input + parameter
+    conditioning). Run only if frame_gated_only is competitive — otherwise
+    skip per Plan B'.
+    """
+    print("=== Training Mode: Token-Gated (frame token + gate) ===")
+    model_path = config["model_path"]
+
+    model = ReFrameVLM(
+        model_path=model_path,
+        lora_config=get_default_lora_config(
+            rank=config.get("lora_rank", 64),
+            alpha=config.get("lora_alpha", 128),
+            dropout=config.get("lora_dropout", 0.05),
+        ),
+        use_frame_tokens=True,
+        use_relation_head=False,
+        use_frame_gated_lora=True,
+    )
+
+    dataset = ReFrameDataset(
+        data_path=config["train_data"],
+        mode="qa",
+        view_permutation=False,
+    )
+
+    collator = ReFrameCollator(
+        processor=model.processor,
+        max_length=config.get("max_length", 640),
+        use_frame_tokens=True,
+        use_frame_text_prompt=False,
+    )
+
+    training_args = build_training_args(config)
+    trainer = BaselineTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=dataset,
+        data_collator=collator,
+    )
+    trainer.train()
+    trainer.save_model()
+    print(f"Token-gated model saved to {config.get('output_dir')}")
+
+
 def train_full(config):
     """
     Full method: LoRA + frame tokens + consistency loss + view permutation.
@@ -224,6 +318,8 @@ TRAIN_MODES = {
     "baseline": train_baseline,
     "frame": train_frame,
     "full": train_full,
+    "frame_gated": train_frame_gated,
+    "token_gated": train_token_gated,
 }
 
 

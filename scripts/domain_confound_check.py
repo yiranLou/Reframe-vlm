@@ -69,11 +69,12 @@ def main():
 
     # 2. Per-(domain, question_type) accuracy across runs
     runs = [
-        ("zeroshot",          "ZS"),
-        ("prompt_baseline",   "Pr"),
-        ("baseline_lora_ep1", "Naive"),
-        ("frame_lora_ep1",    "Frame"),
-        ("full_method_ep1",   "Full"),
+        ("zeroshot",                  "ZS"),
+        ("prompt_baseline",           "Pr"),
+        ("baseline_lora_ep1",         "Naive"),
+        ("text_instruction_lora_ep1", "TextInstr"),
+        ("frame_lora_ep1",            "Frame"),
+        ("full_method_ep1",           "Full"),
     ]
     run_maps = {r: load_run(r) for r, _ in runs}
 
@@ -110,6 +111,35 @@ def main():
         na_acc = sum(na[i] for i in ids2) / len(ids2) * 100
         fr_acc = sum(fr[i] for i in ids2) / len(ids2) * 100
         print(f"| {dom} | {qt} | {len(ids2)} | {fr_acc-na_acc:+.2f} | {na_acc:.2f} | {fr_acc:.2f} |")
+
+    # 4. Where does text-instruction SFT win over Naive LoRA, per group?
+    ti = run_maps.get("text_instruction_lora_ep1")
+    if ti is not None:
+        print("\n=== Table D: text-instr SFT − Naive LoRA per group (pp) ===")
+        print("| domain | question_type | n | Δ | Naive | TextInstr |")
+        print("|---|---|---:|---:|---:|---:|")
+        for (dom, qt), ids in sorted(groups.items(), key=lambda x: -len(x[1])):
+            ids2 = [i for i in ids if i in na and i in ti]
+            if not ids2:
+                continue
+            na_acc = sum(na[i] for i in ids2) / len(ids2) * 100
+            ti_acc = sum(ti[i] for i in ids2) / len(ids2) * 100
+            print(f"| {dom} | {qt} | {len(ids2)} | {ti_acc-na_acc:+.2f} | "
+                  f"{na_acc:.2f} | {ti_acc:.2f} |")
+
+    # 5. Direct head-to-head: text-instr vs Frame LoRA per group
+    if ti is not None:
+        print("\n=== Table E: text-instr SFT − Frame LoRA per group (pp) ===")
+        print("| domain | question_type | n | Δ | Frame | TextInstr |")
+        print("|---|---|---:|---:|---:|---:|")
+        for (dom, qt), ids in sorted(groups.items(), key=lambda x: -len(x[1])):
+            ids2 = [i for i in ids if i in fr and i in ti]
+            if not ids2:
+                continue
+            fr_acc = sum(fr[i] for i in ids2) / len(ids2) * 100
+            ti_acc = sum(ti[i] for i in ids2) / len(ids2) * 100
+            print(f"| {dom} | {qt} | {len(ids2)} | {ti_acc-fr_acc:+.2f} | "
+                  f"{fr_acc:.2f} | {ti_acc:.2f} |")
 
 
 if __name__ == "__main__":

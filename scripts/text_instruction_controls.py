@@ -1,27 +1,31 @@
 """
-Counterfactual frame-token inference controls.
+Counterfactual inference-time controls for the LoRA + text-instruction SFT
+checkpoint.
 
-Uses the Frame LoRA checkpoint (frame_lora/checkpoint-716) and re-evaluates
-ViewSpatial under 4 conditions that differ only in the frame token prepended
-to each question at inference time:
+Counterpart to ``frame_token_controls.py`` but the conditioning signal is the
+natural-language frame instruction (FRAME_TEXT_PROMPTS in
+src/training/collator.py mirroring src/eval/run_benchmark.py FRAME_PROMPTS).
 
-    correct       — original frame_type (baseline, already computed)
-    wrong         — flip camera <-> person (dominant test frame types)
-    none          — no frame token at all (same as use_frame_token=False)
-    always_camera — always prepend <frame_camera>
+Five conditions:
+  correct       — instruction matches the sample's frame_type (default eval).
+  wrong         — instruction is swapped (camera ↔ person) — fall back to
+                  person for object/world to keep symmetric.
+  none          — no instruction prepended.
+  always_camera — always use the camera-perspective instruction.
+  always_person — always use the person-perspective instruction.
 
-If the model truly uses frame tokens, `wrong` should underperform `correct`.
-If `none` matches `correct`, the token was decorative. If `always_camera`
-approaches `correct` (close to 50% of test set is camera-perspective), the
-model may just have learned to use any prepended token as a generic prefix.
+Together with the Frame LoRA wrong-frame controls, this answers the paper-
+critical question: does each conditioning channel act as a *test-time
+control* (matters which signal is given at inference) or merely as a
+*training-time signal* (model bakes in frame behaviour and ignores the
+runtime conditioning)?
 
-Usage:
-    python scripts/frame_token_controls.py \
-        --ckpt checkpoints/frame_lora/checkpoint-716 \
-        --conditions wrong,none,always_camera \
-        --out_dir results/frame_controls
+Usage::
 
-Takes ~1-2h per condition on A100 (5712 ViewSpatial samples).
+    python scripts/text_instruction_controls.py \
+        --ckpt checkpoints/text_instruction_lora/checkpoint-716 \
+        --conditions wrong,none,always_camera,always_person \
+        --out_dir results/text_instr_controls
 """
 
 import argparse
@@ -44,12 +48,13 @@ from src.eval.run_benchmark import (
 FLIP_PERSPECTIVE = {
     "camera": "person",
     "person": "camera",
-    "object": "person",   # no object in ViewSpatial, but map if it appears
+    "object": "person",
     "world":  "person",
 }
 
 
-def override_frame_type(sample, condition):
+def override_frame_for_text_prompt(sample, condition):
+    """Returns (frame_type_str, use_frame_prompt)."""
     ft = sample.get("frame_type", "camera")
     if condition == "correct":
         return ft, True
@@ -60,7 +65,7 @@ def override_frame_type(sample, condition):
     if condition == "always_person":
         return "person", True
     if condition == "none":
-        return None, False   # no token injected at all
+        return None, False
     raise ValueError(condition)
 
 
@@ -69,15 +74,15 @@ def evaluate_condition(model, processor, samples, condition, out_path):
     total = 0
     rows = []
     for s in tqdm(samples, desc=f"[{condition}]"):
-        ft_use, inject = override_frame_type(s, condition)
+        ft_use, inject = override_frame_for_text_prompt(s, condition)
         pred = run_inference(
             model, processor,
             images=s["images"],
             question=s["question"],
             choices=s.get("choices"),
             frame_type=ft_use,
-            use_frame_prompt=False,
-            use_frame_token=inject,
+            use_frame_prompt=inject,   # <-- text instruction path
+            use_frame_token=False,
             max_new_tokens=32,
         )
         ok = match_answer(pred, s["answer"], s.get("choices"))
@@ -92,7 +97,6 @@ def evaluate_condition(model, processor, samples, condition, out_path):
             "frame_type_used": ft_use,
             "condition": condition,
         })
-
     acc = correct / total * 100 if total else 0
     result = {
         "benchmark": "viewspatial",
@@ -111,11 +115,13 @@ def evaluate_condition(model, processor, samples, condition, out_path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", default="checkpoints/frame_lora/checkpoint-716")
-    ap.add_argument("--conditions", default="wrong,none,always_camera",
-                    help="comma-separated subset of {correct,wrong,none,always_camera}")
-    ap.add_argument("--out_dir", default="results/frame_controls")
-    ap.add_argument("--bench_path", default="data/processed/viewspatial_test.jsonl")
+    ap.add_argument("--ckpt",
+                    default="checkpoints/text_instruction_lora/checkpoint-716")
+    ap.add_argument("--conditions",
+                    default="wrong,none,always_camera,always_person")
+    ap.add_argument("--out_dir", default="results/text_instr_controls")
+    ap.add_argument("--bench_path",
+                    default="data/processed/viewspatial_test.jsonl")
     args = ap.parse_args()
 
     conds = [c.strip() for c in args.conditions.split(",") if c.strip()]
@@ -129,7 +135,8 @@ def main():
         out = os.path.join(args.out_dir, f"viewspatial_{cond}.json")
         if os.path.exists(out):
             print(f"[skip] {out} exists")
-            with open(out) as f: d = json.load(f)
+            with open(out) as f:
+                d = json.load(f)
             summary[cond] = d["accuracy"]
             continue
         summary[cond] = evaluate_condition(model, processor, samples, cond, out)

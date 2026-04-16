@@ -1,0 +1,36 @@
+# Frame-Gated LoRA only — parameter-space frame conditioning baseline.
+# No <frame_*> special tokens, no consistency loss, no view permutation.
+# This is the clean "fourth mechanism" data point for the analysis paper.
+
+mode: frame_gated
+model_path: models/qwen25-vl-7b
+train_data: data/processed/train.jsonl
+output_dir: checkpoints/frame_gated_lora
+
+# LoRA — identical to Frame LoRA / text-instr SFT for fair comparison
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+
+# Training — 1 epoch only, matching all other rows in the comparison
+num_epochs: 1
+batch_size: 4
+gradient_accumulation: 16
+learning_rate: 2.0e-5
+scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_length: 512
+
+# Hardware
+bf16: true
+gradient_checkpointing: true
+num_workers: 4
+
+# Logging
+logging_steps: 10
+save_strategy: epoch
+save_total_limit: 1
+report_to: wandb
+run_name: reframe_frame_gated
+seed: 42

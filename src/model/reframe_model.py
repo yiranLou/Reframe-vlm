@@ -95,6 +95,8 @@ class ReFrameVLM(nn.Module):
         use_frame_tokens=True,
         use_relation_head=True,
         canonical_dim=64,
+        use_frame_gated_lora=False,
+        num_frames=4,
     ):
         super().__init__()
 
@@ -113,10 +115,12 @@ class ReFrameVLM(nn.Module):
             self.hidden_dim = cfg.hidden_size
         self.use_frame_tokens = use_frame_tokens
         self.use_relation_head = use_relation_head
+        self.use_frame_gated_lora = use_frame_gated_lora
+        self.num_frames = num_frames
 
-        # Add frame special tokens
+        # Always create the processor — frame special tokens are opt-in.
+        self.processor = AutoProcessor.from_pretrained(model_path)
         if use_frame_tokens:
-            self.processor = AutoProcessor.from_pretrained(model_path)
             num_added = add_frame_tokens_to_tokenizer(self.processor)
             if num_added > 0:
                 self.base_model.resize_token_embeddings(
@@ -127,6 +131,21 @@ class ReFrameVLM(nn.Module):
         if lora_config is None:
             lora_config = get_default_lora_config()
         self.base_model = get_peft_model(self.base_model, lora_config)
+
+        # Optional Frame-Gated LoRA: per-LoRA-layer per-frame multiplicative
+        # gate, identity-initialised so behaviour starts identical to
+        # standard LoRA. See src/model/frame_lora.py.
+        if use_frame_gated_lora:
+            from .frame_lora import (
+                patch_lora_with_frame_gating, num_gate_parameters,
+            )
+            patched = patch_lora_with_frame_gating(
+                self.base_model,
+                num_frames=num_frames,
+                dtype=torch.bfloat16,
+            )
+            print(f"[Frame-Gated LoRA] patched {len(patched)} LoRA layers; "
+                  f"gate params = {num_gate_parameters(self.base_model):,}")
 
         # Relation head for consistency loss.
         # Cast to bf16 so the dtype matches the base model's hidden states
@@ -204,9 +223,20 @@ class ReFrameVLM(nn.Module):
         """
         Forward pass.
 
-        When output_hidden_states=True, also computes relation logits
+        When ``use_frame_gated_lora=True`` and ``frame_type_ids`` is given,
+        the LoRA gates are configured to multiply LoRA outputs by the
+        per-sample gate. Set ``frame_type_ids=None`` to disable gating
+        (recovers standard LoRA).
+
+        When ``output_hidden_states=True``, also computes relation logits
         for consistency loss.
         """
+        # Configure Frame-Gated LoRA before the base forward so any subsequent
+        # gradient-checkpointing recompute reads the same frame ids.
+        if self.use_frame_gated_lora:
+            from .frame_lora import set_frame_type_ids_for_lora
+            set_frame_type_ids_for_lora(self.base_model, frame_type_ids)
+
         need_hidden = output_hidden_states or self.use_relation_head
 
         outputs = self.base_model(
@@ -259,7 +289,8 @@ class ReFrameVLM(nn.Module):
         self.save_auxiliary_modules(save_dir)
 
     def save_auxiliary_modules(self, save_dir):
-        """Save non-LoRA trainable modules (relation head, projections)."""
+        """Save non-LoRA trainable modules (relation head, projections,
+        frame-gated LoRA gates)."""
         import os
         os.makedirs(save_dir, exist_ok=True)
 
@@ -273,6 +304,10 @@ class ReFrameVLM(nn.Module):
                 self.canonical_proj.state_dict(),
                 os.path.join(save_dir, "canonical_proj.pt"),
             )
+        if self.use_frame_gated_lora:
+            from .frame_lora import save_frame_gates
+            n = save_frame_gates(self.base_model, save_dir)
+            print(f"[Frame-Gated LoRA] saved {n} gates to {save_dir}")
 
     def load_auxiliary_modules(self, save_dir):
         """Load non-LoRA trainable modules."""
@@ -285,6 +320,11 @@ class ReFrameVLM(nn.Module):
         cp_path = os.path.join(save_dir, "canonical_proj.pt")
         if os.path.exists(cp_path) and self.canonical_proj is not None:
             self.canonical_proj.load_state_dict(torch.load(cp_path))
+
+        if self.use_frame_gated_lora:
+            from .frame_lora import load_frame_gates
+            n = load_frame_gates(self.base_model, save_dir)
+            print(f"[Frame-Gated LoRA] loaded {n} gates from {save_dir}")
 
 
 def build_model(

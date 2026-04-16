@@ -23,37 +23,43 @@ now being implemented (C).
    gain was entirely OOD COCO (+2.86 pp, p < 0.001), not in-domain ScanNet
    (+0.45, not significant). Story moved to "frame tokens enable OOD transfer."
 4. **Pivot 3** (2026-04-16, after LoRA + text-instruction SFT): text-instruction
-   SFT **dominates learned frame tokens everywhere**:
-   - ViewSpatial overall: text-instr **50.82** vs Frame LoRA **49.12** (+1.70 pp)
-   - COCO OOD: text-instr **+2.89 pp over Frame LoRA, CI [+1.48, +4.34], p < 0.001**
-   - FCA: text-instr **19.28** vs Frame LoRA **13.35** (+5.93 pp, huge)
-   - Natural-language frame prompts beat learned `<frame_*>` tokens on *every*
-     axis we measure when both are fine-tuned with identical recipes.
+   SFT clearly beats learned frame tokens on ViewSpatial-related axes, but the
+   picture on cross-dataset MMSI is mixed and CR is *not* solved:
+   - ViewSpatial overall: text-instr **50.82** vs Frame LoRA **49.12** (+1.70 pp).
+   - COCO OOD: text-instr **+2.89 pp over Frame LoRA, CI [+1.48, +4.34], p < 0.001**.
+   - FCA (paired-correct rate): text-instr **19.28** vs Frame LoRA **13.35**
+     (+5.93 pp).
+   - **MMSI is mixed**: Frame LoRA 26.60 *> text-instr 25.70* (~−0.9 pp). On
+     1 000-sample MMSI the difference is not significant, but the directional
+     reversal means we cannot claim text-instruction "dominates everywhere".
+   - **Contradiction Rate is NOT solved**: text-instr CR = 62.55 vs zero-shot
+     56.43 (+6.1 pp). Text-instruction lifts paired-correct rate (FCA) but
+     does not reduce paired-disagreement (CR). Accuracy gain and contradiction
+     avoidance are distinct axes.
 
-   Frame LoRA is no longer a viable headline method. Natural-language frame
-   instructions become the new strong supervised baseline.
+   Net: Frame LoRA is no longer a viable headline method. Natural-language
+   frame instructions become the new strongest supervised mechanism on
+   ViewSpatial / FCA, with the caveats above.
 
-**Plan B (paper floor — already supportable today)**:
+**Plan B' (LOCKED 2026-04-16) — analysis paper, not method paper**:
 
-> *"Frame-aware VLM Adaptation: A Diagnostic Comparison of Token-, Text-, and
-> Latent-Level Conditioning."* Systematic empirical evaluation of three
-> supervised conditioning mechanisms (+ a soft-consistency diagnostic variant).
-> Natural-language frame instructions dominate (+5.75 pp on OOD COCO, p < 0.001),
-> learned frame tokens provide a smaller gain (+2.86 pp), and soft latent
-> consistency regularisation hurts OOD transfer. Our frame-switch diagnostic
-> protocol (FCA/CR/FG) exposes an accuracy–consistency trade-off that persists
-> regardless of conditioning mechanism.
+> *"How Should VLMs Be Conditioned on Reference Frames? A Diagnostic Study
+> of Spatial Reasoning."* Controlled comparison of four supervised
+> conditioning mechanisms — input-space natural-language instructions,
+> input-space learned tokens, parameter-space gated LoRA, and latent-space
+> soft consistency — under matched LoRA training. Combined with a scene-leakage
+> audit, ScanNet/COCO domain split, frame-switch diagnostic protocol
+> (FCA/CR/FG), and counterfactual frame-token interventions. Headline finding:
+> natural-language instructions are strongest on ViewSpatial OOD (+5.75 pp on
+> COCO over naive LoRA, p < 0.001) and on paired-correct rate (FCA 19.28 vs
+> 13.35), but contradiction rate rises under every fine-tuning recipe
+> (56 → 62-64 %). Counterfactual controls show learned frame tokens are
+> *vestigial at inference* — wrong tokens cost only −0.31 pp.
 
-**Plan C (paper upside — Frame-Gated LoRA now in implementation)**:
-
-> *"Frame-Gated LoRA: Parameter-Space Reference-Frame Conditioning for VLM
-> Spatial Reasoning."* A per-LoRA-layer, identity-initialised gate
-> `g_f = 1 + tanh(E_f)` modulates LoRA output by frame type. Trained, saved and
-> loaded without collapsing the PEFT adapter. If this beats text-instruction
-> SFT on OOD COCO by > +1 pp with CI excluding 0, it becomes the main method
-> contribution and paper C subsumes paper B.
-
-Decision trigger: token_gated 1-epoch eval on COCO subset (ETA 2026-04-19).
+The Frame-Gated LoRA module is implemented and trained as the **fourth
+mechanism baseline**, not a headline method. We do *not* claim a new SOTA
+adapter; we claim a controlled empirical study of where reference-frame
+conditioning lives in the network.
 
 ---
 
@@ -162,9 +168,10 @@ Key paper takeaways:
    reliable accuracy–consistency trade-off artefact across all mechanisms.
 2. **text-instruction SFT is the only method that meaningfully lifts FCA**
    (11.24 → 19.28, a 72 % relative improvement over Naive LoRA). Every other
-   method is essentially tied with Naive on FCA. This is a second-tier headline
-   for paper B: *natural-language conditioning is the unique mechanism that
-   jointly improves accuracy and cross-frame consistency.*
+   method is essentially tied with Naive on FCA. **However, CR is *not*
+   reduced** by text-instruction (62.55 vs zero-shot 56.43). Paired-correct
+   rate (FCA) and paired-disagreement rate (CR) move on different axes — text
+   instruction lifts the former, no method reliably lowers the latter.
 3. Full Method has tightest |FG| but the gain comes from collapsing Person
    accuracy — we frame it as a controlled negative finding.
 
