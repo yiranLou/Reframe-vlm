@@ -1,0 +1,45 @@
+# Smoke test for custom_train_loop.py — verifies checkpoint saving.
+# 20 training samples × 1 epoch, tiny batch → completes in ~2-3 minutes and
+# exercises both the per-epoch save AND the final save paths.
+
+mode: full
+model_path: models/qwen25-vl-7b
+train_data: data/processed/smoke_train.jsonl
+consistency_pairs: data/processed/smoke_pairs.jsonl
+output_dir: checkpoints/smoke_custom
+
+# Tokens / tuning
+use_frame_tokens: true
+lora_rank: 32
+lora_alpha: 64
+lora_dropout: 0.05
+
+# Consistency
+lambda_consistency: 0.1
+canonical_dim: 64
+consistency_every: 3
+consistency_annealing: false
+
+# View aug (disabled for determinism)
+view_permutation: false
+
+# Training — minimal
+num_epochs: 1
+batch_size: 1
+gradient_accumulation: 2
+learning_rate: 2.0e-5
+scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_length: 512
+
+# Hardware
+bf16: true
+gradient_checkpointing: true
+num_workers: 0
+
+# Logging
+logging_steps: 2
+report_to: none
+run_name: smoke_custom
+seed: 42
