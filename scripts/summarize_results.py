@@ -34,6 +34,8 @@ PREFERRED_ORDER = [
     "baseline_lora_ep1",
     "text_instruction_lora_ep1",
     "frame_lora_ep1",
+    "frame_gated_lora_ep1",
+    "token_gated_lora_ep1",
     "full_method_ep1",
 ]
 NICE_LABEL = {
@@ -42,6 +44,8 @@ NICE_LABEL = {
     "baseline_lora_ep1": "Naive LoRA (ep1)",
     "text_instruction_lora_ep1": "LoRA + text instruction SFT (ep1)",
     "frame_lora_ep1": "+ frame token (ep1)",
+    "frame_gated_lora_ep1": "Frame-Gated LoRA (gate only, ep1)",
+    "token_gated_lora_ep1": "Token + Gated LoRA (ep1)",
     "full_method_ep1": "Full (frame + consistency + perm, ep1)",
 }
 

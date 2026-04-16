@@ -25,16 +25,20 @@ RUNS = [
     ("baseline_lora_ep1",         "Naive LoRA"),
     ("text_instruction_lora_ep1", "LoRA+text-instr SFT"),
     ("frame_lora_ep1",            "Frame LoRA"),
+    ("frame_gated_lora_ep1",      "Frame-Gated LoRA"),
+    ("token_gated_lora_ep1",      "Token+Gated LoRA"),
     ("full_method_ep1",           "Full Method"),
 ]
 COMPARISONS = [
-    # Primary comparisons
-    ("frame_lora_ep1", "text_instruction_lora_ep1"),  # THE key paper number
-    ("frame_lora_ep1", "baseline_lora_ep1"),          # Frame vs Naive
-    ("text_instruction_lora_ep1", "baseline_lora_ep1"),  # text instr helps at all?
-    ("frame_lora_ep1", "prompt_baseline"),            # vs inference-only prompt
-    ("full_method_ep1", "frame_lora_ep1"),            # Full vs Frame (negative)
-    ("baseline_lora_ep1", "zeroshot"),                # SFT effect
+    # Primary mechanism comparisons
+    ("text_instruction_lora_ep1", "frame_lora_ep1"),       # text vs token
+    ("frame_gated_lora_ep1",      "text_instruction_lora_ep1"),  # gate vs text
+    ("frame_gated_lora_ep1",      "frame_lora_ep1"),       # gate vs token
+    ("frame_gated_lora_ep1",      "baseline_lora_ep1"),    # gate vs naive
+    ("text_instruction_lora_ep1", "baseline_lora_ep1"),    # text vs naive
+    ("frame_lora_ep1",            "baseline_lora_ep1"),    # token vs naive
+    ("full_method_ep1",           "frame_lora_ep1"),       # Full vs Frame
+    ("baseline_lora_ep1",         "zeroshot"),             # SFT effect
 ]
 
 BENCHES = ["viewspatial", "mmsi", "ego3d"]

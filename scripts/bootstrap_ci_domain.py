@@ -28,14 +28,18 @@ RUNS = [
     ("baseline_lora_ep1",         "Naive LoRA"),
     ("text_instruction_lora_ep1", "LoRA+text-instr SFT"),
     ("frame_lora_ep1",            "Frame LoRA"),
+    ("frame_gated_lora_ep1",      "Frame-Gated LoRA"),
+    ("token_gated_lora_ep1",      "Token+Gated LoRA"),
     ("full_method_ep1",           "Full Method"),
 ]
 COMPARISONS = [
-    ("frame_lora_ep1", "text_instruction_lora_ep1"),
-    ("frame_lora_ep1", "baseline_lora_ep1"),
+    ("text_instruction_lora_ep1", "frame_lora_ep1"),
+    ("frame_gated_lora_ep1",      "text_instruction_lora_ep1"),
+    ("frame_gated_lora_ep1",      "frame_lora_ep1"),
     ("text_instruction_lora_ep1", "baseline_lora_ep1"),
-    ("full_method_ep1", "frame_lora_ep1"),
-    ("baseline_lora_ep1", "zeroshot"),
+    ("frame_lora_ep1",            "baseline_lora_ep1"),
+    ("full_method_ep1",           "frame_lora_ep1"),
+    ("baseline_lora_ep1",         "zeroshot"),
 ]
 
 N_BOOT = 10_000
