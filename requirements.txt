@@ -1,10 +1,11 @@
-# Core
+# Core — pinned to versions known to work on RunPod A100 (2026-04-16)
 torch>=2.4.0
 torchvision>=0.19.0
-transformers>=4.46.0
-peft>=0.17.0
-accelerate>=0.34.0
+transformers>=5.5.0            # trainable_token_indices needs recent HF
+peft>=0.17.0                   # trainable_token_indices for frame-token LoRA
+accelerate>=1.0.0
 deepspeed>=0.15.0
+safetensors>=0.4.0             # used directly in eval for checkpoint detection
 
 # Qwen2.5-VL
 qwen-vl-utils
@@ -19,5 +20,5 @@ pyyaml
 # Eval (optional, for fast inference)
 # vllm>=0.6.0
 
-# Flash attention (install separately)
+# Flash attention (install separately — requires matching CUDA version)
 # pip install flash-attn --no-build-isolation
