@@ -1,53 +1,77 @@
 # ReFrame-VLM — Execution Progress & Paper Status
 
-**Target venue**: EMNLP 2026 (ARR 2026-05-25 cycle)
+**Target venue**: EMNLP 2026 main conference (ARR 2026-05-25 cycle)
 **Backbone**: Qwen2.5-VL-7B + LoRA
 **Environment**: RunPod A100-SXM4-80GB, PyTorch 2.5.1, CUDA 12.8
-**Latest update**: 2026-04-15 11:40 UTC
+**Latest update**: 2026-04-16 09:50 UTC (post-P0-d pivot 3)
 
 ---
 
 ## 1. Executive summary — where we are today
 
-The paper has pivoted twice based on empirical findings. Current state of the
-story is honest but not yet fully locked:
+The paper has pivoted **three times** based on empirical findings. Current
+state is a dual-track plan: floor is already a publishable empirical /
+diagnostic paper (B); upper bound depends on a Frame-Gated LoRA experiment
+now being implemented (C).
 
-1. **Original plan** (pre-training): *"Frame-Conditioned LoRA + Consistency Loss
-   are the method; show they beat prompt engineering and naive SFT on 3 benchmarks."*
-2. **First pivot** (2026-04-14, after Full Method training): consistency loss
-   regressed on both ViewSpatial (−1.03 pp) and MMSI (−1.10 pp) vs Frame LoRA.
-   Retreat to *"Frame token is the main contribution; consistency loss becomes a
-   negative diagnostic finding."*
-3. **Second pivot** (2026-04-15, after scene-leakage audit and domain-split
-   bootstrap): **The Frame LoRA improvement on ViewSpatial is almost entirely
-   driven by the COCO subset** (+2.86 pp, *p* < 0.001), not the ScanNet subset
-   (+0.45 pp, not significant). This matches the scene-leakage finding:
-   ScanNet scenes overlap 98.6 % with training, while COCO images are truly
-   out-of-distribution for our training pipeline.
+1. **Original plan** (pre-training): "Frame-Conditioned LoRA + Consistency Loss
+   are the method; show they beat prompt engineering and naive SFT on 3 benchmarks."
+2. **Pivot 1** (2026-04-14, after Full Method ep1): consistency loss regressed on
+   both ViewSpatial (−1.03 pp) and MMSI (−1.10 pp). Retreat to "Frame token is
+   the main contribution; consistency loss is a negative diagnostic finding."
+3. **Pivot 2** (2026-04-15, scene-leakage + domain-split bootstrap): Frame LoRA
+   gain was entirely OOD COCO (+2.86 pp, p < 0.001), not in-domain ScanNet
+   (+0.45, not significant). Story moved to "frame tokens enable OOD transfer."
+4. **Pivot 3** (2026-04-16, after LoRA + text-instruction SFT): text-instruction
+   SFT **dominates learned frame tokens everywhere**:
+   - ViewSpatial overall: text-instr **50.82** vs Frame LoRA **49.12** (+1.70 pp)
+   - COCO OOD: text-instr **+2.89 pp over Frame LoRA, CI [+1.48, +4.34], p < 0.001**
+   - FCA: text-instr **19.28** vs Frame LoRA **13.35** (+5.93 pp, huge)
+   - Natural-language frame prompts beat learned `<frame_*>` tokens on *every*
+     axis we measure when both are fine-tuned with identical recipes.
 
-**Working paper thesis (tentative, pending P0-d)**:
+   Frame LoRA is no longer a viable headline method. Natural-language frame
+   instructions become the new strong supervised baseline.
 
-> Learned reference-frame tokens do not mainly help in same-scene in-domain
-> evaluation; their value appears in out-of-distribution visual domains, where
-> they provide a transferable frame-conditioning signal beyond naive fine-tuning.
-> Frame-switch diagnostics reveal that accuracy-oriented fine-tuning can
-> worsen cross-frame consistency (CR rises from 56 to 63 %), and soft latent
-> consistency regularisation, counter-intuitively, harms OOD transfer.
+**Plan B (paper floor — already supportable today)**:
 
-Whether this survives as the final claim depends on the **LoRA + text-instruction
-SFT** baseline, currently queued and due ~2026-04-16 09:20 UTC.
+> *"Frame-aware VLM Adaptation: A Diagnostic Comparison of Token-, Text-, and
+> Latent-Level Conditioning."* Systematic empirical evaluation of three
+> supervised conditioning mechanisms (+ a soft-consistency diagnostic variant).
+> Natural-language frame instructions dominate (+5.75 pp on OOD COCO, p < 0.001),
+> learned frame tokens provide a smaller gain (+2.86 pp), and soft latent
+> consistency regularisation hurts OOD transfer. Our frame-switch diagnostic
+> protocol (FCA/CR/FG) exposes an accuracy–consistency trade-off that persists
+> regardless of conditioning mechanism.
+
+**Plan C (paper upside — Frame-Gated LoRA now in implementation)**:
+
+> *"Frame-Gated LoRA: Parameter-Space Reference-Frame Conditioning for VLM
+> Spatial Reasoning."* A per-LoRA-layer, identity-initialised gate
+> `g_f = 1 + tanh(E_f)` modulates LoRA output by frame type. Trained, saved and
+> loaded without collapsing the PEFT adapter. If this beats text-instruction
+> SFT on OOD COCO by > +1 pp with CI excluding 0, it becomes the main method
+> contribution and paper C subsumes paper B.
+
+Decision trigger: token_gated 1-epoch eval on COCO subset (ETA 2026-04-19).
 
 ---
 
 ## 2. Runs currently live
 
-| PID | Role | Started | ETA | Log |
-|---:|---|---|---|---|
-| 85936 | P0-b wrong-frame inference controls (Frame LoRA ckpt × ViewSpatial × {wrong, none, always_camera}) | 2026-04-15 11:17 UTC | 2026-04-15 ~14:48 UTC | `logs/frame_controls.log` |
-| 86693 | P0-d orchestrator: waits on 85936, then trains `text_instruction_lora` for 1 epoch, evaluates on ViewSpatial + MMSI, refreshes bootstrap tables | — | 2026-04-16 ~09:20 UTC | `logs/text_instr/_runner.log` |
+*As of 2026-04-16 09:50 UTC — pipeline idle.*
 
-Currently **no** full-method / consistency-loss training is active and we are
-not going to resume it — see §6.
+Pipeline queue for Plan 2 (started 2026-04-16):
+
+| Step | Role | GPU hours | Status |
+|---|---|---:|---|
+| 2a | `text_instruction_controls.py` — wrong / none / always-camera instruction on text_instruction_lora ckpt × ViewSpatial (parallel to Frame LoRA wrong-frame controls) | ~6 | queued |
+| 2b | Implement Frame-Gated LoRA modules + configs + dry-run | 0 (CPU dev) | in progress |
+| 2c | `token_gated` training (token + gate, 1 epoch) | ~25 | blocked on 2b |
+| 2d | token_gated eval ViewSpatial + MMSI, refresh bootstrap / domain-split | ~2 | blocked on 2c |
+| 2e | Decision: win → launch frame_gated-only ablation; else → freeze experiments, start writing | 0 | blocked on 2d |
+
+Full Method / consistency-loss work is closed — see §6.
 
 ---
 
@@ -60,9 +84,10 @@ not going to resume it — see §6.
 | Qwen2.5-VL zero-shot | 36.45 | — | — |
 | + text prompt (inference only) | 38.27 | — | — |
 | Naive LoRA | 47.48 | 25.10 | — |
-| **Frame LoRA** | **49.12** | **26.60** | — |
+| **LoRA + text-instr SFT** | **50.82** | 25.70 | — |
+| Frame LoRA (learned frame tokens) | 49.12 | **26.60** | — |
 | Full Method (frame + consist + perm) | 48.09 | 25.50 | 39.92 |
-| *LoRA + text-instr SFT (P0-d)* | *TBD 2026-04-16* | *TBD* | *skipped* |
+| *Frame-Gated LoRA (token_gated)* | *TBD 2026-04-19* | *TBD* | *skipped* |
 
 ### Table 2 — Per-domain bootstrap (ViewSpatial, 10k paired resamples)
 
@@ -73,14 +98,17 @@ not going to resume it — see §6.
 | Zero-shot | 38.08 | [36.08, 40.09] |
 | + text prompt | 39.54 | [37.47, 41.67] |
 | Naive LoRA | 54.41 | [52.15, 56.58] |
-| **Frame LoRA** | 54.86 | [52.59, 57.17] |
+| **LoRA + text-instr SFT** | **55.39** | [53.01, 57.79] |
+| Frame LoRA | 54.86 | [52.59, 57.17] |
 | Full Method | 54.97 | [53.00, 56.92] |
 
 | Δ | 95 % CI | *P*(Δ > 0) |
 |---|---|---:|
-| Frame − Naive | +0.45 [−0.52, +1.44] | 0.808 |
-| Full − Frame | +0.10 [−1.36, +1.58] | 0.549 |
-| Naive − zero-shot | +16.33 [+13.84, +18.82] | 1.000 |
+| Frame − text-instr (ScanNet) | −0.52 [−2.13, +1.05] | 0.253 |
+| Frame − Naive (ScanNet) | +0.45 [−0.52, +1.44] | 0.808 |
+| text-instr − Naive (ScanNet) | +0.97 [−0.64, +2.59] | 0.875 |
+| Full − Frame (ScanNet) | +0.10 [−1.36, +1.58] | 0.549 |
+| Naive − zero-shot (ScanNet) | +16.33 [+13.84, +18.82] | 1.000 |
 
 **COCO subset** — sample-resampled (k=2834, OOD). No image overlap with training.
 
@@ -89,14 +117,17 @@ not going to resume it — see §6.
 | Zero-shot | 34.79 | [32.99, 36.59] |
 | + text prompt | 36.98 | [35.22, 38.74] |
 | Naive LoRA | 40.44 | [38.60, 42.20] |
-| **Frame LoRA** | **43.30** | **[41.43, 45.17]** |
+| **LoRA + text-instr SFT** | **46.19** | **[44.39, 48.09]** |
+| Frame LoRA | 43.30 | [41.43, 45.17] |
 | Full Method | 41.11 | [39.31, 42.91] |
 
 | Δ | 95 % CI | *P*(Δ > 0) |
 |---|---|---:|
-| **Frame − Naive (COCO)** | **+2.86 [+1.80, +3.88]** | **1.000** |
-| **Full − Frame (COCO)** | **−2.19 [−3.53, −0.85]** | **0.000** |
-| Naive − zero-shot (COCO) | +5.65 [+3.60, +7.69] | 1.000 |
+| **Frame − text-instr (COCO)** | **−2.89 [−4.34, −1.48]** | **0.000** |
+| **text-instr − Naive (COCO)** | **+5.75 [+4.23, +7.23]** | **1.000** |
+| Frame − Naive (COCO) | +2.86 [+1.80, +3.92] | 1.000 |
+| Full − Frame (COCO) | −2.19 [−3.49, −0.88] | 0.000 |
+| Naive − zero-shot (COCO) | +5.65 [+3.67, +7.69] | 1.000 |
 
 ### Table 3 — Confound check (domain × question-type)
 
@@ -121,15 +152,21 @@ in-domain ScanNet subset.
 | Zero-shot | 6.22 | 56.43 | 28.41 | 40.46 | −12.05 |
 | + text prompt | 9.24 | 57.03 | 29.82 | 45.68 | −15.86 |
 | Naive LoRA | 11.24 | 61.85 | 19.78 | 64.56 | −44.78 |
-| **Frame LoRA** | **13.35** | 63.65 | 21.99 | **68.37** | −46.39 |
+| **LoRA + text-instr SFT** | **19.28** | 62.55 | 29.02 | **72.09** | −43.07 |
+| Frame LoRA | 13.35 | 63.65 | 21.99 | 68.37 | −46.39 |
 | Full Method | 10.34 | **62.85** | 21.59 | 61.95 | **−40.36** |
 
-Key paper takeaway: **all fine-tuning setups *raise* CR**, zero-shot is the lowest.
-This is the first paper-grade "accuracy–consistency trade-off" artefact and
-becomes the second headline result.
+Key paper takeaways:
 
-Full Method's only clear win is tightest |FG|, paid for by a Person-accuracy
-collapse — we will frame this as *controlled negative finding*, not a method win.
+1. **All fine-tuning setups raise CR** (56 → 62–64), zero-shot has lowest CR. A
+   reliable accuracy–consistency trade-off artefact across all mechanisms.
+2. **text-instruction SFT is the only method that meaningfully lifts FCA**
+   (11.24 → 19.28, a 72 % relative improvement over Naive LoRA). Every other
+   method is essentially tied with Naive on FCA. This is a second-tier headline
+   for paper B: *natural-language conditioning is the unique mechanism that
+   jointly improves accuracy and cross-frame consistency.*
+3. Full Method has tightest |FG| but the gain comes from collapsing Person
+   accuracy — we frame it as a controlled negative finding.
 
 ---
 
@@ -204,15 +241,23 @@ interesting than "we found λ that works".
 
 ---
 
-## 7. Paper decision tree (post P0-d, ~2026-04-16 09:20 UTC)
+## 7. Paper decision tree — P0-d is in (2026-04-16) → activate Plan 2
 
-Let Δ = (Frame LoRA acc) − (LoRA + text-instr SFT acc) on the COCO subset.
+### Resolved from P0-d
 
-| Δ sign & magnitude | Paper claim | Headline number |
+Δ = Frame LoRA − text-instr on COCO = **−2.89, CI [−4.34, −1.48], P(Δ>0) ≈ 0**.
+This is the "Δ < −1" branch: learned frame tokens **lose** to text-instruction
+SFT under identical training recipes.
+
+### New decision (gated by token_gated result, ETA 2026-04-19)
+
+Let Δ' = Frame-Gated LoRA (token_gated) − text-instruction SFT on COCO.
+
+| Δ' sign & magnitude | Paper track | Implication |
 |---|---|---|
-| **Δ > +1 pp, CI excludes 0** | *Learned frame tokens transfer beyond natural-language prompts even when both are supervised.* | COCO: Frame 43.30 vs text-instr **X**, Δ **≥+1**, *p* < 0.05 |
-| **−1 < Δ < +1, CI straddles 0** | *Frame-aware supervised tuning matters; token form is orthogonal.* Claim moves to "either frame-conditioning mechanism works, and both beat naive SFT by ≈2 pp on OOD". | COCO: any fine-tuned+frame-aware method > Naive by ~2-3 pp |
-| **Δ < −1, CI excludes 0** | Reverse the paper: the stronger baseline is text-instruction SFT. Frame-token becomes an ablation row. | Text-instr SFT X vs Frame 43.30, Δ < −1 |
+| **Δ' > +1 pp, CI excludes 0** | **Paper C** — parameter-space frame conditioning is the new method | Headline: token_gated > text-instr on OOD; also run frame_gated-only ablation |
+| **−1 < Δ' < +1, CI straddles 0** | **Paper B** — diagnostic comparison of 4 mechanisms | Honest tie; report as "parameter-space gating matches text instruction, neither beats the other alone" |
+| **Δ' < −1, CI excludes 0** | **Paper B** — diagnostic with stronger text-instruction conclusion | text-instruction remains the winner across mechanisms; Frame-Gated becomes ablation row |
 
 ---
 
@@ -235,12 +280,15 @@ Let Δ = (Frame LoRA acc) − (LoRA + text-instr SFT acc) on the COCO subset.
 
 | Date | Task |
 |---|---|
-| 2026-04-15 | P0-b running, P0-d queued. Scene + domain audit, bootstrap tables ready. |
-| 2026-04-16 | P0-d finishes; domain-split CI re-generated with the new row. Pick the paper claim using §7 decision tree. Write results section draft. |
-| 2026-04-17 → 04-20 | Decide if wrong-frame controls support a mechanism figure; (optional) launch scrambled-label control if budget allows. |
-| 2026-04-21 → 04-30 | Figures: motivation, method schematic, Frame-switch diagnostic illustration. Draft related work and method sections. |
-| 2026-05-01 → 05-15 | Full paper draft, ablations, limitations, appendix. |
-| 2026-05-16 → 05-22 | Internal review, polish, checklist, anonymisation. |
+| 2026-04-15 | P0-b wrong-frame controls done. P0-d text-instruction SFT trained and evaluated. Scene + domain audit, all bootstrap tables current. |
+| 2026-04-16 | **Pivot 3 applied**. Implement Frame-Gated LoRA (core module + ReFrameVLM integration + configs + dry-run). Launch text_instruction inference-time controls (~6 h GPU) overnight. |
+| 2026-04-17 | Finish dry-run (include save/load round-trip). Launch `token_gated` training (~25 h GPU). Write method section draft for both Plan B (baseline) and Plan C (upside). |
+| 2026-04-18 | token_gated training completes; eval ViewSpatial + MMSI + refresh domain-split bootstrap. |
+| 2026-04-19 | **Decision point**: apply §7 decision tree. If C, launch `frame_gated`-only ablation (~25 h). Start figure 1 (motivation) and figure 2 (method). |
+| 2026-04-20 → 04-25 | Related work, draft intro + results. Finalise all tables. |
+| 2026-04-26 → 05-05 | Full first draft; polish diagnostic section; appendix. |
+| 2026-05-06 → 05-15 | Internal review, limitations, ethics / checklist, anonymisation. |
+| 2026-05-16 → 05-22 | Final polish, camera-ready formatting pass. |
 | 2026-05-23 → 05-25 | ARR upload, preferred venue EMNLP 2026 main. |
 
 ---
@@ -322,7 +370,15 @@ New files this cycle (beyond the original plan):
 
 High-priority (blocking for paper):
 
-* [ ] Receive P0-d result → pick paper claim via §7 decision tree.
+* [x] ~~Receive P0-d result → pick paper claim via §7 decision tree.~~ Done 2026-04-16.
+* [ ] **Implement Frame-Gated LoRA (in progress, §2 step 2b).** Properly
+  replace the vaporware `frame_lora.py` with identity-initialised per-layer
+  gate `g_f = 1 + tanh(E_f)`, save/load round-trip verified.
+* [ ] Run text-instruction inference-time controls (wrong / none / always-camera
+  instruction variants) to match the Frame LoRA wrong-frame control set. Needed
+  to claim whether text-instruction is *inference-time control* or (like Frame
+  LoRA) mostly a *training signal*.
+* [ ] Launch `token_gated` training → eval → decide Paper B vs C.
 * [ ] Relabel "Frame-Conditioned LoRA" → "Learned Frame Tokens" throughout
   the codebase and all future paper drafts.
 * [ ] Split every accuracy number in the paper into ScanNet (in-domain,
@@ -332,15 +388,12 @@ High-priority (blocking for paper):
 Medium:
 
 * [ ] Run bootstrap with a Holm / BH multi-comparison correction for the final
-  table (we do about 5 paired comparisons simultaneously).
+  table (we do ~5 paired comparisons simultaneously).
 * [ ] Produce a domain-stratified version of Table 4 (FCA/CR/FG on ScanNet vs
   COCO pairs).
 * [ ] Mechanism figure: wrong-frame vs correct-frame accuracy by domain.
 
 Low (post-submission backlog):
 
-* [ ] Properly implement α\_f frame-conditioned LoRA (the version `frame_lora.py`
-  gestures at) and re-run — if it beats special-token embedding, strengthen the
-  claim in a camera-ready update.
 * [ ] Scrambled-frame-label control training (~27 h).
 * [ ] λ scheduler / annealed consistency loss with explicit geometric signal.
