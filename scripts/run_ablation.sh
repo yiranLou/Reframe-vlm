@@ -25,12 +25,13 @@ for config in "${ABLATIONS[@]}"; do
     echo "Training..."
     python src/training/train.py --config "$config"
 
-    # Get output dir from config
+    # Get output dir and token mode from config
     output_dir=$(python -c "import yaml; print(yaml.safe_load(open('$config'))['output_dir'])")
+    use_frame_tokens=$(python -c "import yaml; cfg=yaml.safe_load(open('$config')); print('yes' if cfg.get('use_frame_tokens', False) else 'no')")
 
     # Eval
     echo "Evaluating..."
-    bash scripts/run_eval_all.sh "$output_dir" "$BASE_MODEL"
+    bash scripts/run_eval_all.sh "$output_dir" "$BASE_MODEL" "$use_frame_tokens"
 
     echo ""
     echo "$name: DONE"
@@ -42,7 +43,7 @@ echo "=============================="
 echo "Baseline LoRA (already trained)"
 echo "=============================="
 if [ -d "checkpoints/baseline_lora" ]; then
-    bash scripts/run_eval_all.sh "checkpoints/baseline_lora" "$BASE_MODEL"
+    bash scripts/run_eval_all.sh "checkpoints/baseline_lora" "$BASE_MODEL" no
 fi
 
 echo ""

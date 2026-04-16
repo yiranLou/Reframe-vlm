@@ -47,8 +47,11 @@ class ReFrameTrainer(Trainer):
         relation_logits = outputs.get("relation_logits")
 
         # The canonical projection module is a submodule of the ReFrameVLM.
-        # Under DDP / Accelerate, model may be wrapped; unwrap via .module.
-        base = model.module if hasattr(model, "module") else model
+        # Under DDP / Accelerate, unwrap the model before looking it up.
+        if hasattr(self, "accelerator"):
+            base = self.accelerator.unwrap_model(model)
+        else:
+            base = model.module if hasattr(model, "module") else model
         canonical_proj = getattr(base, "canonical_proj", None)
 
         loss_dict = self.reframe_loss(
@@ -92,7 +95,11 @@ class BaselineTrainer(Trainer):
         # but currently doesn't use them in forward. Pass through when supported.
         try:
             outputs = model(**inputs, frame_type_ids=frame_type_ids)
-        except TypeError:
+        except TypeError as exc:
+            # Plain HF/PEFT models do not accept frame_type_ids. Re-raise
+            # other TypeErrors so real forward bugs are not hidden.
+            if "frame_type_ids" not in str(exc):
+                raise
             outputs = model(**inputs)
 
         # ReFrameVLM returns a dict; PEFT-wrapped HF model returns ModelOutput.

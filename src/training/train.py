@@ -13,19 +13,17 @@ Usage:
 """
 
 import argparse
+import inspect
 import os
 import yaml
 import torch
 # Workaround for cuDNN initialization issues on some CUDA 12.x setups
 torch.backends.cudnn.enabled = False
 from transformers import AutoProcessor, TrainingArguments
-from peft import LoraConfig, TaskType
 
 from src.model.reframe_model import (
     ReFrameVLM,
-    add_frame_tokens_to_tokenizer,
     get_default_lora_config,
-    FRAME_SPECIAL_TOKENS,
 )
 from src.training.dataset import ReFrameDataset
 from src.training.collator import ReFrameCollator
@@ -40,6 +38,9 @@ def load_config(config_path):
 
 def build_training_args(config):
     """Build HuggingFace TrainingArguments from config."""
+    eval_value = config.get(
+        "eval_strategy", config.get("evaluation_strategy", "no")
+    )
     kwargs = dict(
         output_dir=config.get("output_dir", "checkpoints/default"),
         num_train_epochs=config.get("num_epochs", 3),
@@ -59,11 +60,22 @@ def build_training_args(config):
         dataloader_num_workers=config.get("num_workers", 4),
         remove_unused_columns=False,
         seed=config.get("seed", 42),
-        eval_strategy=config.get("eval_strategy", "no"),
     )
+    sig = inspect.signature(TrainingArguments.__init__)
+    if "eval_strategy" in sig.parameters:
+        kwargs["eval_strategy"] = eval_value
+    elif "evaluation_strategy" in sig.parameters:
+        kwargs["evaluation_strategy"] = eval_value
     if "max_steps" in config:
         kwargs["max_steps"] = config["max_steps"]
     return TrainingArguments(**kwargs)
+
+
+def save_processor(processor, output_dir):
+    """Persist processor/tokenizer so eval can reload frame tokens correctly."""
+    os.makedirs(output_dir, exist_ok=True)
+    processor.save_pretrained(output_dir)
+    print(f"Processor/tokenizer saved to {output_dir}")
 
 
 def train_baseline(config):
@@ -118,7 +130,9 @@ def train_baseline(config):
 
     trainer.train()
     trainer.save_model()
-    print(f"Baseline model saved to {config.get('output_dir')}")
+    output_dir = config.get("output_dir", "checkpoints/baseline")
+    save_processor(processor, output_dir)
+    print(f"Baseline model saved to {output_dir}")
 
 
 def train_frame(config):
@@ -130,7 +144,9 @@ def train_frame(config):
 
     model_path = config["model_path"]
 
-    # Build model with frame tokens
+    use_frame_tokens = config.get("use_frame_tokens", True)
+
+    # Build model with optional frame tokens
     model = ReFrameVLM(
         model_path=model_path,
         lora_config=get_default_lora_config(
@@ -138,7 +154,7 @@ def train_frame(config):
             alpha=config.get("lora_alpha", 128),
             dropout=config.get("lora_dropout", 0.05),
         ),
-        use_frame_tokens=True,
+        use_frame_tokens=use_frame_tokens,
         use_relation_head=False,  # No consistency loss yet
     )
 
@@ -152,7 +168,7 @@ def train_frame(config):
     collator = ReFrameCollator(
         processor=model.processor,
         max_length=config.get("max_length", 2048),
-        use_frame_tokens=True,
+        use_frame_tokens=use_frame_tokens,
     )
 
     training_args = build_training_args(config)
@@ -166,7 +182,10 @@ def train_frame(config):
 
     trainer.train()
     trainer.save_model()
-    print(f"Frame-conditioned model saved to {config.get('output_dir')}")
+    output_dir = config.get("output_dir", "checkpoints/frame")
+    model.save_auxiliary_modules(output_dir)
+    save_processor(model.processor, output_dir)
+    print(f"Frame-conditioned model saved to {output_dir}")
 
 
 def train_frame_gated(config):
@@ -214,7 +233,10 @@ def train_frame_gated(config):
     )
     trainer.train()
     trainer.save_model()
-    print(f"Frame-gated model saved to {config.get('output_dir')}")
+    output_dir = config.get("output_dir", "checkpoints/frame_gated")
+    model.save_auxiliary_modules(output_dir)
+    save_processor(model.processor, output_dir)
+    print(f"Frame-gated model saved to {output_dir}")
 
 
 def train_token_gated(config):
@@ -226,6 +248,7 @@ def train_token_gated(config):
     print("=== Training Mode: Token-Gated (frame token + gate) ===")
     model_path = config["model_path"]
 
+    use_frame_tokens = config.get("use_frame_tokens", True)
     model = ReFrameVLM(
         model_path=model_path,
         lora_config=get_default_lora_config(
@@ -233,7 +256,7 @@ def train_token_gated(config):
             alpha=config.get("lora_alpha", 128),
             dropout=config.get("lora_dropout", 0.05),
         ),
-        use_frame_tokens=True,
+        use_frame_tokens=use_frame_tokens,
         use_relation_head=False,
         use_frame_gated_lora=True,
     )
@@ -247,7 +270,7 @@ def train_token_gated(config):
     collator = ReFrameCollator(
         processor=model.processor,
         max_length=config.get("max_length", 640),
-        use_frame_tokens=True,
+        use_frame_tokens=use_frame_tokens,
         use_frame_text_prompt=False,
     )
 
@@ -260,7 +283,10 @@ def train_token_gated(config):
     )
     trainer.train()
     trainer.save_model()
-    print(f"Token-gated model saved to {config.get('output_dir')}")
+    output_dir = config.get("output_dir", "checkpoints/token_gated")
+    model.save_auxiliary_modules(output_dir)
+    save_processor(model.processor, output_dir)
+    print(f"Token-gated model saved to {output_dir}")
 
 
 def train_full(config):
@@ -271,6 +297,7 @@ def train_full(config):
 
     model_path = config["model_path"]
 
+    use_frame_tokens = config.get("use_frame_tokens", True)
     model = ReFrameVLM(
         model_path=model_path,
         lora_config=get_default_lora_config(
@@ -278,7 +305,7 @@ def train_full(config):
             alpha=config.get("lora_alpha", 128),
             dropout=config.get("lora_dropout", 0.05),
         ),
-        use_frame_tokens=True,
+        use_frame_tokens=use_frame_tokens,
         use_relation_head=True,
         canonical_dim=config.get("canonical_dim", 64),
     )
@@ -295,7 +322,7 @@ def train_full(config):
     collator = ReFrameCollator(
         processor=model.processor,
         max_length=config.get("max_length", 2048),
-        use_frame_tokens=True,
+        use_frame_tokens=use_frame_tokens,
     )
 
     training_args = build_training_args(config)
@@ -310,8 +337,10 @@ def train_full(config):
 
     trainer.train()
     trainer.save_model()
-    model.save_auxiliary_modules(config.get("output_dir", "checkpoints/full"))
-    print(f"Full model saved to {config.get('output_dir')}")
+    output_dir = config.get("output_dir", "checkpoints/full")
+    model.save_auxiliary_modules(output_dir)
+    save_processor(model.processor, output_dir)
+    print(f"Full model saved to {output_dir}")
 
 
 TRAIN_MODES = {

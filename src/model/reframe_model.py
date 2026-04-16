@@ -17,6 +17,7 @@ Two implementation strategies supported:
    - Requires custom forward pass
 """
 
+import inspect
 import torch
 import torch.nn as nn
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
@@ -57,9 +58,14 @@ def add_frame_tokens_to_tokenizer(processor):
     return num_added
 
 
-def get_default_lora_config(rank=64, alpha=128, dropout=0.05):
+def get_default_lora_config(
+    rank=64,
+    alpha=128,
+    dropout=0.05,
+    trainable_token_indices=None,
+):
     """Default LoRA configuration for Qwen2.5-VL."""
-    return LoraConfig(
+    kwargs = dict(
         task_type=TaskType.CAUSAL_LM,
         r=rank,
         lora_alpha=alpha,
@@ -69,6 +75,16 @@ def get_default_lora_config(rank=64, alpha=128, dropout=0.05):
             "gate_proj", "up_proj", "down_proj",
         ],
     )
+    if trainable_token_indices is not None:
+        sig = inspect.signature(LoraConfig.__init__)
+        if "trainable_token_indices" not in sig.parameters:
+            raise RuntimeError(
+                "This PEFT version does not support trainable_token_indices. "
+                "Upgrade PEFT before training learned frame-token models; "
+                "otherwise the added <frame_*> embeddings stay frozen."
+            )
+        kwargs["trainable_token_indices"] = trainable_token_indices
+    return LoraConfig(**kwargs)
 
 
 class ReFrameVLM(nn.Module):
@@ -120,16 +136,38 @@ class ReFrameVLM(nn.Module):
 
         # Always create the processor — frame special tokens are opt-in.
         self.processor = AutoProcessor.from_pretrained(model_path)
+        self.frame_token_ids = []
         if use_frame_tokens:
             num_added = add_frame_tokens_to_tokenizer(self.processor)
             if num_added > 0:
                 self.base_model.resize_token_embeddings(
                     len(self.processor.tokenizer)
                 )
+            self.frame_token_ids = self.processor.tokenizer.convert_tokens_to_ids(
+                FRAME_SPECIAL_TOKENS
+            )
+            if any(idx is None or idx < 0 for idx in self.frame_token_ids):
+                raise ValueError(
+                    f"Could not resolve frame token ids: {self.frame_token_ids}"
+                )
 
         # Apply LoRA
         if lora_config is None:
-            lora_config = get_default_lora_config()
+            lora_config = get_default_lora_config(
+                trainable_token_indices=(
+                    self.frame_token_ids if use_frame_tokens else None
+                )
+            )
+        elif use_frame_tokens:
+            if hasattr(lora_config, "trainable_token_indices"):
+                if getattr(lora_config, "trainable_token_indices", None) is None:
+                    lora_config.trainable_token_indices = self.frame_token_ids
+            else:
+                raise RuntimeError(
+                    "This PEFT version does not support trainable_token_indices. "
+                    "Upgrade PEFT before training learned frame-token models; "
+                    "otherwise the added <frame_*> embeddings stay frozen."
+                )
         self.base_model = get_peft_model(self.base_model, lora_config)
 
         # Optional Frame-Gated LoRA: per-LoRA-layer per-frame multiplicative
@@ -172,28 +210,58 @@ class ReFrameVLM(nn.Module):
         print(f"Trainable parameters: {trainable:,}")
         print(f"Trainable ratio: {trainable / total:.2%}")
 
-    def get_relation_logits(self, hidden_states, attention_mask=None):
+    def get_relation_logits(self, hidden_states, attention_mask=None, labels=None):
         """
-        Extract relation logits from last non-padding token's hidden state.
+        Extract relation logits from the last supervised answer token when
+        labels are available, falling back to the last non-padding token.
 
         Args:
             hidden_states: (batch, seq_len, hidden_dim)
             attention_mask: (batch, seq_len) optional
+            labels: (batch, seq_len) optional
         Returns:
             (batch, relation_dim)
         """
         if self.relation_head is None:
             return None
 
-        if attention_mask is not None:
-            # Get last non-padding position
-            seq_lengths = attention_mask.sum(dim=1) - 1  # (batch,)
-            batch_indices = torch.arange(
-                hidden_states.shape[0], device=hidden_states.device
+        seq_positions = None
+        if labels is not None:
+            supervised_mask = labels.ne(-100)
+            has_supervised = supervised_mask.any(dim=1)
+            token_positions = torch.arange(
+                hidden_states.shape[1], device=hidden_states.device
             )
-            last_hidden = hidden_states[batch_indices, seq_lengths]
-        else:
-            last_hidden = hidden_states[:, -1, :]
+            last_supervised = (
+                supervised_mask.to(dtype=token_positions.dtype)
+                * token_positions.unsqueeze(0)
+            ).max(dim=1).values
+            if attention_mask is not None:
+                fallback = attention_mask.sum(dim=1).to(torch.long) - 1
+            else:
+                fallback = torch.full_like(
+                    last_supervised, hidden_states.shape[1] - 1
+                )
+            seq_positions = torch.where(
+                has_supervised, last_supervised, fallback
+            )
+
+        if seq_positions is None:
+            if attention_mask is not None:
+                seq_positions = attention_mask.sum(dim=1).to(torch.long) - 1
+            else:
+                seq_positions = torch.full(
+                    (hidden_states.shape[0],),
+                    hidden_states.shape[1] - 1,
+                    device=hidden_states.device,
+                    dtype=torch.long,
+                )
+
+        seq_positions = seq_positions.clamp_min(0)
+        batch_indices = torch.arange(
+            hidden_states.shape[0], device=hidden_states.device
+        )
+        last_hidden = hidden_states[batch_indices, seq_positions]
 
         # Accelerator / Trainer may reset non-base modules to fp32 after
         # Accelerator.prepare(). Align the input dtype at call time so the
@@ -237,7 +305,10 @@ class ReFrameVLM(nn.Module):
             from .frame_lora import set_frame_type_ids_for_lora
             set_frame_type_ids_for_lora(self.base_model, frame_type_ids)
 
-        need_hidden = output_hidden_states or self.use_relation_head
+        # Hidden states are only required when the caller explicitly asks for
+        # them (e.g., pair batches that need consistency loss). Keeping this
+        # off for ordinary QA batches saves memory and improves throughput.
+        need_hidden = bool(output_hidden_states)
 
         outputs = self.base_model(
             input_ids=input_ids,
@@ -254,10 +325,16 @@ class ReFrameVLM(nn.Module):
             "logits": outputs.logits,
         }
 
-        if need_hidden and outputs.hidden_states is not None:
+        if (
+            need_hidden
+            and outputs.hidden_states is not None
+            and self.relation_head is not None
+        ):
             last_hidden_states = outputs.hidden_states[-1]
             result["relation_logits"] = self.get_relation_logits(
-                last_hidden_states, attention_mask
+                last_hidden_states,
+                attention_mask=attention_mask,
+                labels=labels,
             )
         else:
             result["relation_logits"] = None
@@ -315,11 +392,15 @@ class ReFrameVLM(nn.Module):
 
         rh_path = os.path.join(save_dir, "relation_head.pt")
         if os.path.exists(rh_path) and self.relation_head is not None:
-            self.relation_head.load_state_dict(torch.load(rh_path))
+            self.relation_head.load_state_dict(
+                torch.load(rh_path, map_location="cpu")
+            )
 
         cp_path = os.path.join(save_dir, "canonical_proj.pt")
         if os.path.exists(cp_path) and self.canonical_proj is not None:
-            self.canonical_proj.load_state_dict(torch.load(cp_path))
+            self.canonical_proj.load_state_dict(
+                torch.load(cp_path, map_location="cpu")
+            )
 
         if self.use_frame_gated_lora:
             from .frame_lora import load_frame_gates

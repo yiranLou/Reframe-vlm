@@ -13,6 +13,9 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 CHECKS_PASSED = 0
 CHECKS_FAILED = 0
@@ -37,19 +40,19 @@ def check_imports():
         check("PyTorch", True)
         check(f"CUDA 可用", torch.cuda.is_available(),
               "没有 GPU 也能开发，但训练需要")
-    except ImportError as e:
+    except Exception as e:
         check("PyTorch", False, str(e))
 
     try:
         import transformers
         check("Transformers", True)
-    except ImportError as e:
+    except Exception as e:
         check("Transformers", False, str(e))
 
     try:
         import peft
         check("PEFT", True)
-    except ImportError as e:
+    except Exception as e:
         check("PEFT", False, str(e))
 
     try:
@@ -59,7 +62,11 @@ def check_imports():
         check("frame_embedding", False, str(e))
 
     try:
-        from src.model.frame_lora import FrameConditionedLoRALinear, FrameGateMLP
+        from src.model.frame_lora import (
+            FrameGateEmbedding,
+            patch_lora_with_frame_gating,
+            set_frame_type_ids_for_lora,
+        )
         check("frame_lora", True)
     except Exception as e:
         check("frame_lora", False, str(e))
@@ -83,7 +90,7 @@ def check_imports():
         check("dataset", False, str(e))
 
     try:
-        from src.training.losses import ReFrameLoss, FrameConsistencyLoss
+        from src.training.losses import ReFrameLoss
         check("losses", True)
     except Exception as e:
         check("losses", False, str(e))
@@ -182,10 +189,16 @@ def check_model_components():
         r_logits = torch.randn(6, 14, requires_grad=True)
         ft_ids = torch.tensor([0, 1, 0, 2, 1, 3])
         pairs = [(0, 1), (2, 3)]
-        result = loss_fn(qa_loss, r_logits, pairs, ft_ids)
+        result = loss_fn(
+            qa_loss=qa_loss,
+            relation_logits=r_logits,
+            pair_indices=pairs,
+            frame_type_ids=ft_ids,
+            canonical_proj=cp,
+        )
         check("ReFrameLoss forward", "total_loss" in result)
         check("Consistency loss 有梯度",
-              result["total_loss"].requires_grad)
+              result["consistency_loss_raw"].requires_grad)
 
     except Exception as e:
         check("模型组件测试", False, str(e))

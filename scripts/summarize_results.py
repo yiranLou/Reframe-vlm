@@ -19,6 +19,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -48,6 +49,62 @@ NICE_LABEL = {
     "token_gated_lora_ep1": "Token + Gated LoRA (ep1)",
     "full_method_ep1": "Full (frame + consistency + perm, ep1)",
 }
+
+CHOICE_RE = re.compile(r"^\s*\(?([A-Da-d])[\).:]?\s*(.*)$")
+
+
+def _normalize_relation_text(text):
+    text = str(text or "").strip()
+    m = CHOICE_RE.match(text)
+    if m and m.group(2):
+        text = m.group(2)
+    text = text.lower().replace("-", " ")
+    text = re.sub(r"[^a-z0-9. ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _first_choice_letter(text):
+    m = CHOICE_RE.match(str(text or "").strip())
+    return m.group(1).upper() if m else None
+
+
+def _choice_relation(choices, letter):
+    if not choices or not letter:
+        return None
+    idx = ord(letter.upper()) - ord("A")
+    if idx < 0 or idx >= len(choices):
+        return None
+    return _normalize_relation_text(choices[idx])
+
+
+def _target_relation(answer, choices=None):
+    letter = _first_choice_letter(answer)
+    return _choice_relation(choices, letter) or _normalize_relation_text(answer)
+
+
+def _pred_relation(pred, choices=None):
+    letter = _first_choice_letter(pred)
+    return _choice_relation(choices, letter) or _normalize_relation_text(pred)
+
+
+def _is_frame_swap_contradiction(sa, sb, pa, pb):
+    gt_a = _target_relation(sa.get("answer"), sa.get("choices"))
+    gt_b = _target_relation(sb.get("answer"), sb.get("choices"))
+    if not gt_a or not gt_b or gt_a == gt_b:
+        return False
+
+    pred_a = _pred_relation(pa.get("pred"), sa.get("choices"))
+    pred_b = _pred_relation(pb.get("pred"), sb.get("choices"))
+    a_correct = bool(pa.get("correct"))
+    b_correct = bool(pb.get("correct"))
+
+    if a_correct and not b_correct:
+        return pred_b == gt_a
+    if b_correct and not a_correct:
+        return pred_a == gt_b
+    if not a_correct and not b_correct:
+        return pred_a == gt_b and pred_b == gt_a
+    return False
 
 
 def _load_jsonl(path):
@@ -208,8 +265,8 @@ def build_table_consistency(runs, bench_samples):
               "",
               f"*{len(pairs)} cross-frame pairs extracted from the test set.*",
               "",
-              "| Method | FCA ↑ | CR ↓ | Camera Acc | Non-Cam Acc | FG |",
-              "|---|---:|---:|---:|---:|---:|"]
+              "| Method | FCA ↑ | CR ↓ | PDR ↓ | Camera Acc | Non-Cam Acc | FG |",
+              "|---|---:|---:|---:|---:|---:|---:|"]
     if not pairs:
         return "\n".join(header + ["*No pairs found — check `pair_id` in the benchmark jsonl.*"])
 
@@ -219,7 +276,7 @@ def build_table_consistency(runs, bench_samples):
             continue
         pred_map = {r["id"]: r for r in data["results"]}
 
-        both_ok = contra = 0
+        both_ok = contra = disagree = 0
         cam_c = cam_n = other_c = other_n = 0
         n_used = 0
         for sa, sb in pairs:
@@ -230,8 +287,10 @@ def build_table_consistency(runs, bench_samples):
             n_used += 1
             if pa["correct"] and pb["correct"]:
                 both_ok += 1
-            if pa["correct"] != pb["correct"]:
+            if _is_frame_swap_contradiction(sa, sb, pa, pb):
                 contra += 1
+            if pa["correct"] != pb["correct"]:
+                disagree += 1
             for s, pr in ((sa, pa), (sb, pb)):
                 if s.get("frame_type") == "camera":
                     cam_n += 1; cam_c += int(pr["correct"])
@@ -242,14 +301,15 @@ def build_table_consistency(runs, bench_samples):
             continue
         fca = both_ok / n_used * 100
         cr = contra / n_used * 100
+        pdr = disagree / n_used * 100
         cam_acc = cam_c / cam_n * 100 if cam_n else 0
         other_acc = other_c / other_n * 100 if other_n else 0
         fg = cam_acc - other_acc
 
         header.append(
-            "| {m} | {fca:.2f} | {cr:.2f} | {ca:.2f} | {oa:.2f} | {fg:+.2f} |".format(
+            "| {m} | {fca:.2f} | {cr:.2f} | {pdr:.2f} | {ca:.2f} | {oa:.2f} | {fg:+.2f} |".format(
                 m=NICE_LABEL.get(name, name),
-                fca=fca, cr=cr, ca=cam_acc, oa=other_acc, fg=fg,
+                fca=fca, cr=cr, pdr=pdr, ca=cam_acc, oa=other_acc, fg=fg,
             )
         )
     return "\n".join(header)

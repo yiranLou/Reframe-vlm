@@ -18,7 +18,48 @@ Usage:
 
 import argparse
 import json
+import re
 from collections import defaultdict
+
+
+CHOICE_RE = re.compile(r"^\s*\(?([A-Da-d])[\).:]?\s*(.*)$")
+
+
+def _normalize_relation_text(text):
+    """Normalize an answer/prediction to relation content, not option letter."""
+    text = str(text or "").strip()
+    m = CHOICE_RE.match(text)
+    if m and m.group(2):
+        text = m.group(2)
+    text = text.lower().replace("-", " ")
+    text = re.sub(r"[^a-z0-9. ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _first_choice_letter(text):
+    m = CHOICE_RE.match(str(text or "").strip())
+    return m.group(1).upper() if m else None
+
+
+def _choice_relation(choices, letter):
+    if not choices or not letter:
+        return None
+    idx = ord(letter.upper()) - ord("A")
+    if idx < 0 or idx >= len(choices):
+        return None
+    return _normalize_relation_text(choices[idx])
+
+
+def _target_relation(answer, choices=None):
+    letter = _first_choice_letter(answer)
+    mapped = _choice_relation(choices, letter)
+    return mapped or _normalize_relation_text(answer)
+
+
+def _pred_relation(pred, choices=None):
+    letter = _first_choice_letter(pred)
+    mapped = _choice_relation(choices, letter)
+    return mapped or _normalize_relation_text(pred)
 
 
 def load_results(path):
@@ -80,22 +121,41 @@ def find_pairs(benchmark_data):
     return pairs
 
 
-def is_contradiction(pred_a, gt_a, pred_b, gt_b, correct_a, correct_b):
+def is_contradiction(
+    pred_a,
+    gt_a,
+    pred_b,
+    gt_b,
+    correct_a,
+    correct_b,
+    choices_a=None,
+    choices_b=None,
+):
     """
     Detect if paired answers are contradictory.
 
     A contradiction occurs when:
-    - One answer is correct and the other isn't, AND
-    - The incorrect answer matches what would be correct for the OTHER frame
+    - The two frames have different correct relations, AND
+    - A prediction uses the relation that is correct for the opposite frame.
 
     Example: Camera says "left" (correct), Person also says "left"
     but geometrically it should be "right" from person's perspective.
     """
-    if correct_a == correct_b:
-        return False  # Both correct or both wrong - not contradictory
+    gt_a_rel = _target_relation(gt_a, choices_a)
+    gt_b_rel = _target_relation(gt_b, choices_b)
+    if not gt_a_rel or not gt_b_rel or gt_a_rel == gt_b_rel:
+        return False
 
-    # Simple contradiction: one correct, one wrong
-    return True
+    pred_a_rel = _pred_relation(pred_a, choices_a)
+    pred_b_rel = _pred_relation(pred_b, choices_b)
+
+    if correct_a and not correct_b:
+        return pred_b_rel == gt_a_rel
+    if correct_b and not correct_a:
+        return pred_a_rel == gt_b_rel
+    if not correct_a and not correct_b:
+        return pred_a_rel == gt_b_rel and pred_b_rel == gt_a_rel
+    return False
 
 
 def compute_metrics(results, benchmark_data):
@@ -116,6 +176,7 @@ def compute_metrics(results, benchmark_data):
     total_pairs = 0
     both_correct = 0
     contradictions = 0
+    paired_disagreements = 0
 
     # Per-frame accuracy tracking
     frame_stats = defaultdict(lambda: {"correct": 0, "total": 0})
@@ -141,8 +202,11 @@ def compute_metrics(results, benchmark_data):
             pred_a.get("pred", ""), sa["answer"],
             pred_b.get("pred", ""), sb["answer"],
             a_correct, b_correct,
+            sa.get("choices"), sb.get("choices"),
         ):
             contradictions += 1
+        if a_correct != b_correct:
+            paired_disagreements += 1
 
         # Per-frame stats
         for sample, pred in [(sa, pred_a), (sb, pred_b)]:
@@ -157,6 +221,7 @@ def compute_metrics(results, benchmark_data):
     # Compute metrics
     fca = both_correct / total_pairs * 100
     cr = contradictions / total_pairs * 100
+    pdr = paired_disagreements / total_pairs * 100
 
     cam_stats = frame_stats.get("camera", {"correct": 0, "total": 0})
     cam_acc = (
@@ -181,6 +246,7 @@ def compute_metrics(results, benchmark_data):
         "total_pairs": total_pairs,
         "frame_consistency_accuracy": round(fca, 2),
         "contradiction_rate": round(cr, 2),
+        "paired_disagreement_rate": round(pdr, 2),
         "camera_accuracy": round(cam_acc, 2),
         "non_camera_accuracy": round(non_cam_acc, 2),
         "frame_gap": round(fg, 2),
@@ -201,6 +267,7 @@ def compute_metrics(results, benchmark_data):
     print(f"Total pairs:                    {total_pairs}")
     print(f"Frame Consistency Accuracy (FCA): {fca:.2f}%")
     print(f"Contradiction Rate (CR):          {cr:.2f}%")
+    print(f"Paired Disagreement Rate (PDR):   {pdr:.2f}%")
     print(f"Camera Accuracy:                  {cam_acc:.2f}%")
     print(f"Non-Camera Accuracy:              {non_cam_acc:.2f}%")
     print(f"Frame Gap (FG):                   {fg:.2f}%")
@@ -228,7 +295,9 @@ def main():
     metrics = compute_metrics(results, benchmark_data)
 
     if metrics and args.output:
-        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+        output_dir = os.path.dirname(args.output)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
         print(f"\nMetrics saved to {args.output}")

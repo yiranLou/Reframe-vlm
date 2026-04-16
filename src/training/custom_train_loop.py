@@ -188,12 +188,15 @@ def train(config):
                         output_hidden_states=True,
                     )
 
+                    base_model = accelerator.unwrap_model(model)
                     losses = loss_fn(
                         qa_loss=consist_outputs["loss"],
                         relation_logits=consist_outputs.get("relation_logits"),
                         pair_indices=consist_batch.get("pair_indices", []),
                         frame_type_ids=consist_batch.get("frame_type_ids"),
+                        canonical_proj=getattr(base_model, "canonical_proj", None),
                     )
+                    consistency_raw = losses["consistency_loss_raw"]
 
                     # Annealing
                     if use_annealing:
@@ -202,9 +205,9 @@ def train(config):
                             lambda_scale = 0.0
                         else:
                             lambda_scale = (progress - 0.33) / 0.67
-                        total_loss = qa_loss + lambda_scale * losses["consistency_loss"]
+                        total_loss = qa_loss + lambda_scale * consistency_raw
                     else:
-                        total_loss = qa_loss + loss_fn.lambda_consistency * losses["consistency_loss"]
+                        total_loss = qa_loss + loss_fn.lambda_consistency * consistency_raw
 
                     consist_loss_val = losses["consistency_loss"].item()
                 else:
@@ -246,16 +249,19 @@ def train(config):
 
             # 保存 checkpoint
             save_path = os.path.join(output_dir, f"epoch_{epoch+1}")
-            accelerator.unwrap_model(model).base_model.save_pretrained(save_path)
-            accelerator.unwrap_model(model).save_auxiliary_modules(save_path)
+            unwrapped = accelerator.unwrap_model(model)
+            unwrapped.base_model.save_pretrained(save_path)
+            unwrapped.save_auxiliary_modules(save_path)
+            unwrapped.processor.save_pretrained(save_path)
             print(f"Checkpoint 保存到 {save_path}")
 
     # 保存最终模型
     if accelerator.is_main_process:
         final_path = os.path.join(output_dir, "final")
-        accelerator.unwrap_model(model).base_model.save_pretrained(final_path)
-        accelerator.unwrap_model(model).save_auxiliary_modules(final_path)
-        model.processor.save_pretrained(final_path)
+        unwrapped = accelerator.unwrap_model(model)
+        unwrapped.base_model.save_pretrained(final_path)
+        unwrapped.save_auxiliary_modules(final_path)
+        unwrapped.processor.save_pretrained(final_path)
         print(f"\n最终模型保存到 {final_path}")
 
 

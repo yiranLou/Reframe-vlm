@@ -274,7 +274,8 @@ class ReFrameCollator:
             text=all_texts,
             images=flat_images if flat_images else None,
             padding=True,
-            truncation=False,
+            truncation=True,
+            max_length=self.max_length,
             return_tensors="pt",
         )
 

@@ -160,7 +160,9 @@ def main():
         )
 
     if args.output:
-        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+        output_dir = os.path.dirname(args.output)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as f:
             json.dump(analysis, f, indent=2)
         print(f"\nAnalysis saved to {args.output}")

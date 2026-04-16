@@ -45,7 +45,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo " Step 5: Baseline LoRA Fine-tune"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 python src/training/train.py --config configs/train_baseline.yaml
-bash scripts/run_eval_all.sh checkpoints/baseline_lora "$MODEL_PATH"
+bash scripts/run_eval_all.sh checkpoints/baseline_lora "$MODEL_PATH" no
 
 echo ""
 echo ">> Gate 3: Baseline 应该比 zero-shot 高 3-5%+"
@@ -58,7 +58,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo " Step 6: Frame-Conditioned LoRA"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 python src/training/train.py --config configs/train_frame.yaml
-bash scripts/run_eval_all.sh checkpoints/frame_lora "$MODEL_PATH"
+bash scripts/run_eval_all.sh checkpoints/frame_lora "$MODEL_PATH" yes
 
 echo ""
 echo ">> 检查: Frame LoRA 应该比 baseline 再高一些"
@@ -84,7 +84,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo " Step 8-9: Full Method (+ Consistency Loss + View Permutation)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 python src/training/train.py --config configs/train_full.yaml
-bash scripts/run_eval_all.sh checkpoints/full "$MODEL_PATH"
+bash scripts/run_eval_all.sh checkpoints/full "$MODEL_PATH" yes
 
 # ─── Step 10: Ablations ───
 echo ""
@@ -156,7 +156,7 @@ done
 echo ""
 echo "Table 4: Consistency 分析"
 echo "─────────────────────────────────────────────"
-printf "%-25s %8s %8s %8s\n" "Method" "FCA" "CR" "FG"
+printf "%-25s %8s %8s %8s %8s\n" "Method" "FCA" "CR" "PDR" "FG"
 echo "─────────────────────────────────────────────"
 
 for dir in results/zeroshot results/baseline_lora results/full; do
@@ -165,7 +165,7 @@ for dir in results/zeroshot results/baseline_lora results/full; do
         python -c "
 import json
 d = json.load(open('$dir/consistency.json'))
-print(f'  {\"$name\":<23} {d[\"frame_consistency_accuracy\"]:>7.2f} {d[\"contradiction_rate\"]:>7.2f} {d[\"frame_gap\"]:>7.2f}')
+print(f'  {\"$name\":<23} {d[\"frame_consistency_accuracy\"]:>7.2f} {d[\"contradiction_rate\"]:>7.2f} {d.get(\"paired_disagreement_rate\", float(\"nan\")):>7.2f} {d[\"frame_gap\"]:>7.2f}')
 " 2>/dev/null || true
     fi
 done

@@ -121,7 +121,7 @@ def main():
     conds = [c.strip() for c in args.conditions.split(",") if c.strip()]
     print(f"Running conditions: {conds} on {args.ckpt}")
 
-    model, processor = load_model(args.ckpt)
+    model, processor = load_model(args.ckpt, use_frame_tokens=True)
     samples = load_benchmark_data("viewspatial", args.bench_path)
 
     summary = {}

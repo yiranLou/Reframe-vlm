@@ -49,6 +49,7 @@ class ReFrameLoss(nn.Module):
             "total_loss": qa_loss,
             "qa_loss": qa_loss.detach(),
             "consistency_loss": zero,
+            "consistency_loss_raw": zero,
         }
 
         active = (
@@ -75,7 +76,8 @@ class ReFrameLoss(nn.Module):
         proj_a = canonical_proj(r_a, ft_a)
         proj_b = canonical_proj(r_b, ft_b)
 
-        l_consist = F.mse_loss(proj_a, proj_b)
+        l_consist = F.mse_loss(proj_a.float(), proj_b.float())
+        result["consistency_loss_raw"] = l_consist
         result["consistency_loss"] = l_consist.detach()
         result["total_loss"] = qa_loss + self.lambda_consistency * l_consist
         return result

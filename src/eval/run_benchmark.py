@@ -30,6 +30,53 @@ from qwen_vl_utils import process_vision_info
 from peft import PeftModel
 
 
+FRAME_TYPE_TO_TOKEN = {
+    "camera": "<frame_camera>",
+    "person": "<frame_person>",
+    "object": "<frame_object>",
+    "world": "<frame_world>",
+}
+FRAME_SPECIAL_TOKENS = list(FRAME_TYPE_TO_TOKEN.values())
+FRAME_TYPE_TO_ID = {
+    "camera": 0,
+    "person": 1,
+    "object": 2,
+    "world": 3,
+}
+
+
+def _load_processor_with_fallback(primary_path, fallback_path=None):
+    """Load processor from primary path first, then fallback path."""
+    paths = [p for p in (primary_path, fallback_path) if p]
+    last_error = None
+    for path in paths:
+        try:
+            return AutoProcessor.from_pretrained(path)
+        except Exception as e:
+            last_error = e
+    raise RuntimeError(
+        f"Failed to load processor from {paths}. Last error: {last_error}"
+    )
+
+
+def _ensure_frame_tokens(processor, model):
+    """
+    Ensure special frame tokens exist in tokenizer and model embedding table.
+    Returns number of newly added tokens.
+    """
+    tokenizer = processor.tokenizer
+    vocab = tokenizer.get_vocab()
+    missing = [tok for tok in FRAME_SPECIAL_TOKENS if tok not in vocab]
+    if not missing:
+        return 0
+    num_added = tokenizer.add_special_tokens(
+        {"additional_special_tokens": missing}
+    )
+    if num_added > 0:
+        model.resize_token_embeddings(len(tokenizer))
+    return num_added
+
+
 def load_model(model_path, base_model_path=None, use_frame_tokens=False):
     """
     Load model for evaluation.
@@ -51,7 +98,7 @@ def load_model(model_path, base_model_path=None, use_frame_tokens=False):
 
     if is_reframe_full_save:
         if base_model_path is None:
-            base_model_path = "/workspace/models/qwen25-vl-7b"
+            base_model_path = "models/qwen25-vl-7b"
         print(f"Detected ReFrameVLM full save. Reconstructing from {model_path}")
         # Build fresh ReFrameVLM with frame tokens (so tokenizer gets resized)
         from src.model.reframe_model import ReFrameVLM, get_default_lora_config
@@ -78,12 +125,16 @@ def load_model(model_path, base_model_path=None, use_frame_tokens=False):
             print(f"  Missing examples: {missing[:3]}")
         if unexpected:
             print(f"  Unexpected examples: {unexpected[:3]}")
-        # Move to GPU
-        wrapper = wrapper.cuda()
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        wrapper = wrapper.to(device)
         # Merge LoRA for inference speed
         wrapper.base_model = wrapper.base_model.merge_and_unload()
         model = wrapper.base_model
         processor = wrapper.processor
+        if use_frame_tokens:
+            added = _ensure_frame_tokens(processor, model)
+            if added:
+                print(f"Added {added} missing frame tokens to tokenizer")
         model.eval()
         return model, processor
 
@@ -92,6 +143,7 @@ def load_model(model_path, base_model_path=None, use_frame_tokens=False):
             with open(adapter_config) as f:
                 cfg = json.load(f)
             base_model_path = cfg.get("base_model_name_or_path", model_path)
+        processor = _load_processor_with_fallback(model_path, base_model_path)
         print(f"Loading base model from {base_model_path}")
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             base_model_path,
@@ -99,10 +151,34 @@ def load_model(model_path, base_model_path=None, use_frame_tokens=False):
             device_map="auto",
             attn_implementation="flash_attention_2",
         )
+        if use_frame_tokens:
+            added = _ensure_frame_tokens(processor, model)
+            if added:
+                print(f"Added {added} missing frame tokens to tokenizer")
+        elif len(processor.tokenizer) != model.get_input_embeddings().num_embeddings:
+            model.resize_token_embeddings(len(processor.tokenizer))
+
         print(f"Loading LoRA adapter from {model_path}")
         model = PeftModel.from_pretrained(model, model_path)
-        model = model.merge_and_unload()
-        processor = AutoProcessor.from_pretrained(base_model_path)
+        gates_path = os.path.join(model_path, "frame_lora_gates.pt")
+        if os.path.exists(gates_path):
+            from src.model.frame_lora import (
+                load_frame_gates,
+                patch_lora_with_frame_gating,
+            )
+            patched = patch_lora_with_frame_gating(
+                model,
+                num_frames=len(FRAME_TYPE_TO_ID),
+                dtype=torch.bfloat16,
+            )
+            loaded = load_frame_gates(model, model_path)
+            model._reframe_uses_frame_gated_lora = True
+            print(
+                f"Loaded Frame-Gated LoRA gates: "
+                f"patched={len(patched)}, loaded={loaded}"
+            )
+        else:
+            model = model.merge_and_unload()
     else:
         print(f"Loading model from {model_path}")
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
@@ -111,21 +187,18 @@ def load_model(model_path, base_model_path=None, use_frame_tokens=False):
             device_map="auto",
             attn_implementation="flash_attention_2",
         )
-        processor = AutoProcessor.from_pretrained(model_path)
+        processor = _load_processor_with_fallback(model_path, base_model_path)
+
+    if use_frame_tokens and not os.path.exists(adapter_config):
+        added = _ensure_frame_tokens(processor, model)
+        if added:
+            print(f"Added {added} missing frame tokens to tokenizer")
 
     model.eval()
     return model, processor
 
 
 MAX_IMAGES = 4  # Limit images per sample to control inference speed
-
-
-FRAME_TYPE_TO_TOKEN = {
-    "camera": "<frame_camera>",
-    "person": "<frame_person>",
-    "object": "<frame_object>",
-    "world": "<frame_world>",
-}
 
 
 def run_inference(model, processor, images, question, choices=None,
@@ -202,6 +275,18 @@ def run_inference(model, processor, images, question, choices=None,
         return_tensors="pt",
     ).to(model.device)
 
+    if getattr(model, "_reframe_uses_frame_gated_lora", False):
+        from src.model.frame_lora import set_frame_type_ids_for_lora
+        if frame_type is None:
+            frame_type_ids = None
+        else:
+            frame_type_ids = torch.tensor(
+                [FRAME_TYPE_TO_ID.get(frame_type, 0)],
+                dtype=torch.long,
+                device=inputs.input_ids.device,
+            )
+        set_frame_type_ids_for_lora(model, frame_type_ids)
+
     with torch.no_grad():
         output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)
 
@@ -211,6 +296,9 @@ def run_inference(model, processor, images, question, choices=None,
 
 
 import re as _re
+
+
+CHOICE_RE = _re.compile(r"^\s*\(?([A-Da-d])[\).:]?\s*(.*)$")
 
 
 def _extract_first_number(s: str):
@@ -226,6 +314,36 @@ def _first_letter(s: str):
         return None
     m = _re.match(r"^\(?([A-Da-d])\b", s)
     return m.group(1).upper() if m else None
+
+
+def _normalize_choice_text(text: str):
+    text = str(text or "").strip()
+    m = CHOICE_RE.match(text)
+    if m and m.group(2):
+        text = m.group(2)
+    text = text.lower().replace("-", " ")
+    text = _re.sub(r"[^a-z0-9. ]+", " ", text)
+    return _re.sub(r"\s+", " ", text).strip()
+
+
+def _choice_text(choices, letter):
+    if not choices or not letter:
+        return None
+    idx = ord(letter.upper()) - ord("A")
+    if idx < 0 or idx >= len(choices):
+        return None
+    return _normalize_choice_text(choices[idx])
+
+
+def _matches_choice_content(pred, choice_text):
+    pred_text = _normalize_choice_text(pred)
+    if not pred_text or not choice_text:
+        return False
+    return (
+        pred_text == choice_text
+        or choice_text in pred_text
+        or (len(pred_text) >= 3 and pred_text in choice_text)
+    )
 
 
 def match_answer(pred, gt, choices=None):
@@ -248,7 +366,11 @@ def match_answer(pred, gt, choices=None):
 
     # 1. Letter-only GT
     if _re.fullmatch(r"[A-Da-d]", gt_s):
-        return _first_letter(pred_s) == gt_s.upper()
+        gt_letter = gt_s.upper()
+        return (
+            _first_letter(pred_s) == gt_letter
+            or _matches_choice_content(pred_s, _choice_text(choices, gt_letter))
+        )
 
     # 2. Numeric GT
     if _re.fullmatch(r"-?\d+(?:\.\d+)?", gt_s):
@@ -260,20 +382,26 @@ def match_answer(pred, gt, choices=None):
         rel_err = abs_err / max(abs(gt_val), 1e-6)
         return abs_err <= 1.0 or rel_err <= 0.10
 
+    pred_rel = _normalize_choice_text(pred_s)
+    gt_rel = _normalize_choice_text(gt_s)
+
     # 3. Exact / substring textual match
-    if pred_l == gt_l or gt_l in pred_l:
+    if pred_l == gt_l or gt_l in pred_l or (gt_rel and (pred_rel == gt_rel or gt_rel in pred_rel)):
         return True
 
     if choices:
-        pred_first = pred_l.split()[0] if pred_l else ""
-        gt_first = gt_l.split()[0] if gt_l else ""
-        if pred_first == gt_first:
+        pred_first = pred_rel.split()[0] if pred_rel else ""
+        gt_first = gt_rel.split()[0] if gt_rel else ""
+        if pred_first == gt_first and gt_first:
             return True
-        # Option-letter aware match on full choice strings.
         for i, choice in enumerate(choices):
             letter = chr(ord("A") + i)
-            if gt_l == str(choice).lower():
-                if pred_l.startswith(letter.lower()) or f" {letter.lower()} " in f" {pred_l[:5]} ":
+            choice_text = _choice_text(choices, letter)
+            if gt_l == str(choice).lower() or gt_rel == choice_text:
+                if (
+                    _first_letter(pred_s) == letter
+                    or _matches_choice_content(pred_s, choice_text)
+                ):
                     return True
 
     return False
@@ -379,7 +507,11 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=64)
     args = parser.parse_args()
 
-    model, processor = load_model(args.model_path, args.base_model_path)
+    model, processor = load_model(
+        args.model_path,
+        args.base_model_path,
+        use_frame_tokens=args.use_frame_token,
+    )
 
     benchmarks = (
         ["viewspatial", "mmsi", "ego3d"]
@@ -406,7 +538,9 @@ def main():
         else:
             output_path = f"results/{bench_name}.json"
 
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
 
