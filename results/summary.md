@@ -22,4 +22,13 @@
 
 ## Table 4 — Frame-switch consistency on ViewSpatial
 
-*Benchmark metadata unavailable locally. Re-run with `--bench_path` pointing at the unified ViewSpatial test jsonl to compute FCA / CR / PDR / FG.*
+*996 cross-frame pairs extracted from the test set.*
+
+| Method | FCA ↑ | CR ↓ | PDR ↓ | Camera Acc | Non-Cam Acc | FG |
+|---|---:|---:|---:|---:|---:|---:|
+| Qwen2.5-VL zero-shot | 6.22 | 24.60 | 56.43 | 28.41 | 40.46 | -12.05 |
+| Qwen2.5-VL + text prompt (inference only) | 9.24 | 25.40 | 57.03 | 29.82 | 45.68 | -15.86 |
+| Naive LoRA (ep1) | 11.24 | 32.53 | 61.85 | 19.78 | 64.56 | -44.78 |
+| LoRA + text instruction SFT (ep1) | 19.28 | 25.40 | 62.55 | 29.02 | 72.09 | -43.07 |
+| + frame token (ep1) | 14.26 | 33.94 | 68.17 | 22.69 | 74.00 | -51.31 |
+| Full (frame + consistency + perm, ep1) | 11.45 | 32.73 | 68.57 | 22.49 | 68.98 | -46.49 |
