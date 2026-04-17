@@ -6,8 +6,8 @@
 | Qwen2.5-VL + text prompt (inference only) | 38.27 | — | — |
 | Naive LoRA (ep1) | 47.48 | 25.10 | — |
 | LoRA + text instruction SFT (ep1) | 50.82 | 25.70 | — |
-| + frame token (ep1) | 49.12 | 26.60 | — |
-| Full (frame + consistency + perm, ep1) | 48.09 | 25.50 | 39.92 |
+| + frame token (ep1) | 52.75 | 26.60 | — |
+| Full (frame + consistency + perm, ep1) | 53.10 | 25.50 | 39.92 |
 
 ## Table 3 — ViewSpatial per-frame-type accuracy (%)
 
@@ -17,18 +17,9 @@
 | Qwen2.5-VL + text prompt (inference only) | 40.77 | 35.92 | 38.27 |
 | Naive LoRA (ep1) | 44.64 | 50.15 | 47.48 |
 | LoRA + text instruction SFT (ep1) | 46.70 | 54.71 | 50.82 |
-| + frame token (ep1) | 46.23 | 51.85 | 49.12 |
-| Full (frame + consistency + perm, ep1) | 46.01 | 50.05 | 48.09 |
+| + frame token (ep1) | 47.60 | 57.59 | 52.75 |
+| Full (frame + consistency + perm, ep1) | 48.18 | 57.73 | 53.10 |
 
 ## Table 4 — Frame-switch consistency on ViewSpatial
 
-*996 cross-frame pairs extracted from the test set.*
-
-| Method | FCA ↑ | CR ↓ | Camera Acc | Non-Cam Acc | FG |
-|---|---:|---:|---:|---:|---:|
-| Qwen2.5-VL zero-shot | 6.22 | 56.43 | 28.41 | 40.46 | -12.05 |
-| Qwen2.5-VL + text prompt (inference only) | 9.24 | 57.03 | 29.82 | 45.68 | -15.86 |
-| Naive LoRA (ep1) | 11.24 | 61.85 | 19.78 | 64.56 | -44.78 |
-| LoRA + text instruction SFT (ep1) | 19.28 | 62.55 | 29.02 | 72.09 | -43.07 |
-| + frame token (ep1) | 13.35 | 63.65 | 21.99 | 68.37 | -46.39 |
-| Full (frame + consistency + perm, ep1) | 10.34 | 62.85 | 21.59 | 61.95 | -40.36 |
+*Benchmark metadata unavailable locally. Re-run with `--bench_path` pointing at the unified ViewSpatial test jsonl to compute FCA / CR / PDR / FG.*

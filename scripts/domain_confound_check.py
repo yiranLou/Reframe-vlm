@@ -1,145 +1,149 @@
-"""
-Check whether the COCO / ScanNet domain split is confounded with question_type
-and/or frame_type in ViewSpatial-Bench.
+"""Check whether the ViewSpatial domain split is confounded with question type."""
 
-If COCO subset is ~100% Camera-Object-View-Orientation questions, the claim
-"+2.86pp OOD" must be worded as "+2.86pp on OOD object-view orientation" —
-not as blanket out-of-distribution generalization.
-
-We emit:
-  1. A domain × question_type × frame_type contingency table.
-  2. Per-(domain, question_type) accuracy for every run, so we can see where
-     Frame LoRA's gain actually lives.
-"""
-
+import argparse
 import json
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from result_registry import resolve_result_path
 
+
+DEFAULT_BENCH_PATH = "data/processed/viewspatial_test.jsonl"
 SCENE_RE = re.compile(r"/(scene\d{4}_\d{2})/")
+RUNS = [
+    ("zeroshot", "ZS"),
+    ("prompt_baseline", "Pr"),
+    ("baseline_lora_ep1", "Naive"),
+    ("text_instruction_lora_ep1", "TextInstr"),
+    ("frame_lora_ep1", "Frame"),
+    ("frame_gated_lora_ep1", "FrameGated"),
+    ("token_gated_lora_ep1", "TokenGated"),
+    ("full_method_ep1", "Full"),
+]
 
 
 def domain_of(sample):
-    imgs = sample.get("images") or []
-    if not imgs:
+    images = sample.get("images") or []
+    if not images:
         return "unknown"
-    p = imgs[0]
-    if SCENE_RE.search(p):
+    path = images[0]
+    if SCENE_RE.search(path):
         return "scannet"
-    if "val2017" in p or "/coco" in p.lower():
+    if "val2017" in path or "/coco" in path.lower():
         return "coco"
     return "other"
 
 
-def load_bench():
-    return [json.loads(l) for l in
-            Path("data/processed/viewspatial_test.jsonl").read_text().splitlines()
-            if l.strip()]
+def load_bench(bench_path):
+    path = Path(bench_path)
+    if not path.exists():
+        raise SystemExit(
+            f"ViewSpatial benchmark metadata not found at {bench_path}. "
+            "Pass --bench_path to point at the unified jsonl used for evaluation."
+        )
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def load_run(run):
-    p = Path(f"results/{run}/viewspatial.json")
-    if not p.exists():
+    path = resolve_result_path(run, "viewspatial")
+    if path is None:
         return None
-    return {r["id"]: int(r["correct"]) for r in json.loads(p.read_text())["results"]}
+    return {row["id"]: int(row["correct"]) for row in json.loads(path.read_text())["results"]}
 
 
 def main():
-    samples = load_bench()
-    print(f"\ntotal test samples: {len(samples)}")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bench_path", default=DEFAULT_BENCH_PATH)
+    args = parser.parse_args()
 
-    # 1. Contingency table
-    print("\n=== Table A: Domain × question_type × frame_type (n samples) ===")
+    samples = load_bench(args.bench_path)
+    out = []
+    out.append(f"total test samples: {len(samples)}\n")
+
+    out.append("## Table A: Domain × question_type × frame_type (n samples)\n")
     counts = defaultdict(lambda: defaultdict(Counter))
-    for s in samples:
-        d = domain_of(s)
-        qt = s.get("question_type", "?")
-        ft = s.get("frame_type", "?")
-        counts[d][qt][ft] += 1
+    for sample in samples:
+        counts[domain_of(sample)][sample.get("question_type", "?")][sample.get("frame_type", "?")] += 1
 
-    for dom, qts in counts.items():
-        dom_total = sum(sum(c.values()) for c in qts.values())
-        print(f"\n  {dom.upper()} (n={dom_total})")
-        for qt, fts in qts.items():
-            total = sum(fts.values())
-            breakdown = ", ".join(f"{k}={v}" for k, v in fts.items())
-            print(f"    {qt:55s} {total:>5d}   [{breakdown}]")
+    for domain, qtypes in counts.items():
+        domain_total = sum(sum(counter.values()) for counter in qtypes.values())
+        out.append(f"### {domain.upper()} (n={domain_total})")
+        out.append("")
+        for question_type, frames in qtypes.items():
+            total = sum(frames.values())
+            breakdown = ", ".join(f"{frame}={count}" for frame, count in frames.items())
+            out.append(f"- {question_type}: {total} [{breakdown}]")
+        out.append("")
 
-    # 2. Per-(domain, question_type) accuracy across runs
-    runs = [
-        ("zeroshot",                  "ZS"),
-        ("prompt_baseline",           "Pr"),
-        ("baseline_lora_ep1",         "Naive"),
-        ("text_instruction_lora_ep1", "TextInstr"),
-        ("frame_lora_ep1",            "Frame"),
-        ("full_method_ep1",           "Full"),
-    ]
-    run_maps = {r: load_run(r) for r, _ in runs}
-
-    print("\n=== Table B: Accuracy by domain × question_type (%) ===")
-    # gather groups
+    run_maps = {run: load_run(run) for run, _ in RUNS}
     groups = defaultdict(list)
-    for s in samples:
-        key = (domain_of(s), s.get("question_type", "?"))
-        groups[key].append(s["id"])
+    for sample in samples:
+        groups[(domain_of(sample), sample.get("question_type", "?"))].append(sample["id"])
 
-    header = "| domain | question_type | n | " + " | ".join(lbl for _, lbl in runs) + " |"
-    print(header)
-    print("|---|---|---:|" + "|".join(["---:"] * len(runs)) + "|")
-    for (dom, qt), ids in sorted(groups.items()):
-        row = [dom, qt, str(len(ids))]
-        for rn, _ in runs:
-            m = run_maps[rn]
-            if m is None:
+    out.append("## Table B: Accuracy by domain × question_type (%)\n")
+    out.append("| domain | question_type | n | " + " | ".join(label for _, label in RUNS) + " |")
+    out.append("|---|---|---:|" + "|".join(["---:"] * len(RUNS)) + "|")
+    for (domain, question_type), ids in sorted(groups.items()):
+        row = [domain, question_type, str(len(ids))]
+        for run, _ in RUNS:
+            pred_map = run_maps[run]
+            if pred_map is None:
                 row.append("—")
-            else:
-                vals = [m[i] for i in ids if i in m]
-                row.append(f"{(sum(vals)/len(vals)*100):.2f}" if vals else "—")
-        print("| " + " | ".join(row) + " |")
-
-    # 3. Where does Frame LoRA win over Naive LoRA, per group?
-    print("\n=== Table C: Frame LoRA − Naive LoRA per group (pp) ===")
-    na = run_maps["baseline_lora_ep1"]; fr = run_maps["frame_lora_ep1"]
-    print("| domain | question_type | n | Δ | Naive | Frame |")
-    print("|---|---|---:|---:|---:|---:|")
-    for (dom, qt), ids in sorted(groups.items(), key=lambda x: -len(x[1])):
-        ids2 = [i for i in ids if i in na and i in fr]
-        if not ids2:
-            continue
-        na_acc = sum(na[i] for i in ids2) / len(ids2) * 100
-        fr_acc = sum(fr[i] for i in ids2) / len(ids2) * 100
-        print(f"| {dom} | {qt} | {len(ids2)} | {fr_acc-na_acc:+.2f} | {na_acc:.2f} | {fr_acc:.2f} |")
-
-    # 4. Where does text-instruction SFT win over Naive LoRA, per group?
-    ti = run_maps.get("text_instruction_lora_ep1")
-    if ti is not None:
-        print("\n=== Table D: text-instr SFT − Naive LoRA per group (pp) ===")
-        print("| domain | question_type | n | Δ | Naive | TextInstr |")
-        print("|---|---|---:|---:|---:|---:|")
-        for (dom, qt), ids in sorted(groups.items(), key=lambda x: -len(x[1])):
-            ids2 = [i for i in ids if i in na and i in ti]
-            if not ids2:
                 continue
-            na_acc = sum(na[i] for i in ids2) / len(ids2) * 100
-            ti_acc = sum(ti[i] for i in ids2) / len(ids2) * 100
-            print(f"| {dom} | {qt} | {len(ids2)} | {ti_acc-na_acc:+.2f} | "
-                  f"{na_acc:.2f} | {ti_acc:.2f} |")
+            values = [pred_map[sample_id] for sample_id in ids if sample_id in pred_map]
+            row.append(f"{(sum(values) / len(values) * 100):.2f}" if values else "—")
+        out.append("| " + " | ".join(row) + " |")
 
-    # 5. Direct head-to-head: text-instr vs Frame LoRA per group
-    if ti is not None:
-        print("\n=== Table E: text-instr SFT − Frame LoRA per group (pp) ===")
-        print("| domain | question_type | n | Δ | Frame | TextInstr |")
-        print("|---|---|---:|---:|---:|---:|")
-        for (dom, qt), ids in sorted(groups.items(), key=lambda x: -len(x[1])):
-            ids2 = [i for i in ids if i in fr and i in ti]
-            if not ids2:
+    out.append("\n## Table C: Frame LoRA − Naive LoRA per group (pp)\n")
+    naive = run_maps.get("baseline_lora_ep1")
+    frame = run_maps.get("frame_lora_ep1")
+    out.append("| domain | question_type | n | Δ | Naive | Frame |")
+    out.append("|---|---|---:|---:|---:|---:|")
+    if naive is not None and frame is not None:
+        for (domain, question_type), ids in sorted(groups.items(), key=lambda item: -len(item[1])):
+            common = [sample_id for sample_id in ids if sample_id in naive and sample_id in frame]
+            if not common:
                 continue
-            fr_acc = sum(fr[i] for i in ids2) / len(ids2) * 100
-            ti_acc = sum(ti[i] for i in ids2) / len(ids2) * 100
-            print(f"| {dom} | {qt} | {len(ids2)} | {ti_acc-fr_acc:+.2f} | "
-                  f"{fr_acc:.2f} | {ti_acc:.2f} |")
+            naive_acc = sum(naive[sample_id] for sample_id in common) / len(common) * 100
+            frame_acc = sum(frame[sample_id] for sample_id in common) / len(common) * 100
+            out.append(
+                f"| {domain} | {question_type} | {len(common)} | {frame_acc - naive_acc:+.2f} | {naive_acc:.2f} | {frame_acc:.2f} |"
+            )
+
+    text_instr = run_maps.get("text_instruction_lora_ep1")
+    if naive is not None and text_instr is not None:
+        out.append("\n## Table D: text-instr SFT − Naive LoRA per group (pp)\n")
+        out.append("| domain | question_type | n | Δ | Naive | TextInstr |")
+        out.append("|---|---|---:|---:|---:|---:|")
+        for (domain, question_type), ids in sorted(groups.items(), key=lambda item: -len(item[1])):
+            common = [sample_id for sample_id in ids if sample_id in naive and sample_id in text_instr]
+            if not common:
+                continue
+            naive_acc = sum(naive[sample_id] for sample_id in common) / len(common) * 100
+            ti_acc = sum(text_instr[sample_id] for sample_id in common) / len(common) * 100
+            out.append(
+                f"| {domain} | {question_type} | {len(common)} | {ti_acc - naive_acc:+.2f} | {naive_acc:.2f} | {ti_acc:.2f} |"
+            )
+
+    if frame is not None and text_instr is not None:
+        out.append("\n## Table E: text-instr SFT − Frame LoRA per group (pp)\n")
+        out.append("| domain | question_type | n | Δ | Frame | TextInstr |")
+        out.append("|---|---|---:|---:|---:|---:|")
+        for (domain, question_type), ids in sorted(groups.items(), key=lambda item: -len(item[1])):
+            common = [sample_id for sample_id in ids if sample_id in frame and sample_id in text_instr]
+            if not common:
+                continue
+            frame_acc = sum(frame[sample_id] for sample_id in common) / len(common) * 100
+            ti_acc = sum(text_instr[sample_id] for sample_id in common) / len(common) * 100
+            out.append(
+                f"| {domain} | {question_type} | {len(common)} | {ti_acc - frame_acc:+.2f} | {frame_acc:.2f} | {ti_acc:.2f} |"
+            )
+
+    md = "\n".join(out) + "\n"
+    print(md)
+    Path("results/domain_confound.md").write_text(md, encoding="utf-8")
+    print("\nsaved to results/domain_confound.md")
 
 
 if __name__ == "__main__":

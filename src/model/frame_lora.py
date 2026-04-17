@@ -152,6 +152,13 @@ def patch_lora_with_frame_gating(
     peft_model: nn.Module,
     num_frames: int = NUM_FRAMES,
     dtype: Optional[torch.dtype] = None,
+    skip_name_substrings: Tuple[str, ...] = (
+        "visual",
+        "vision",
+        "vision_tower",
+        "vision_model",
+        "vision_encoder",
+    ),
 ) -> List[Tuple[str, nn.Module]]:
     """Attach a per-frame gate to every PEFT ``LoraLinear`` and rewire
     its ``forward``.
@@ -165,6 +172,9 @@ def patch_lora_with_frame_gating(
     patched: List[Tuple[str, nn.Module]] = []
     for name, mod in peft_model.named_modules():
         if not isinstance(mod, LoraLinear):
+            continue
+        lname = name.lower()
+        if any(token in lname for token in skip_name_substrings):
             continue
         if hasattr(mod, "frame_gate"):
             continue  # already patched

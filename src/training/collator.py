@@ -270,14 +270,24 @@ class ReFrameCollator:
                 else:
                     flat_images.append(imgs)
 
-        inputs = self.processor(
-            text=all_texts,
-            images=flat_images if flat_images else None,
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="pt",
-        )
+        processor_kwargs = {
+            "text": all_texts,
+            "images": flat_images if flat_images else None,
+            "padding": True,
+            "return_tensors": "pt",
+        }
+        # Qwen2.5-VL requires the number of <image> markers in text to stay
+        # aligned with the visual inputs. Truncating a multimodal sequence can
+        # drop text-side image markers and trigger a hard mismatch. Our spatial
+        # QA prompts are short, so keep multimodal batches untruncated; retain
+        # max_length only for rare text-only batches.
+        if flat_images:
+            processor_kwargs["truncation"] = False
+        else:
+            processor_kwargs["truncation"] = True
+            processor_kwargs["max_length"] = self.max_length
+
+        inputs = self.processor(**processor_kwargs)
 
         # 创建标签并遮罩非 assistant 部分
         labels = inputs["input_ids"].clone()
