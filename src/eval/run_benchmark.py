@@ -29,6 +29,8 @@ from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
 from peft import PeftModel
 
+from src.model.frame_semantics import FRAME_TEXT_PROMPTS, FRAME_TYPE_TO_ID
+
 
 FRAME_TYPE_TO_TOKEN = {
     "camera": "<frame_camera>",
@@ -37,14 +39,6 @@ FRAME_TYPE_TO_TOKEN = {
     "world": "<frame_world>",
 }
 FRAME_SPECIAL_TOKENS = list(FRAME_TYPE_TO_TOKEN.values())
-FRAME_TYPE_TO_ID = {
-    "camera": 0,
-    "person": 1,
-    "object": 2,
-    "world": 3,
-}
-
-
 def _load_processor_with_fallback(primary_path, fallback_path=None):
     """Load processor from primary path first, then fallback path."""
     paths = [p for p in (primary_path, fallback_path) if p]
@@ -107,6 +101,8 @@ def load_model(model_path, base_model_path=None, use_frame_tokens=False):
             lora_config=get_default_lora_config(),
             use_frame_tokens=True,
             use_relation_head=False,
+            use_frame_gated_lora=os.path.exists(os.path.join(model_path, "frame_lora_gates.pt")),
+            use_semantic_frame_gating=os.path.exists(os.path.join(model_path, "frame_semantics.pt")),
         )
         # Load saved state into wrapper
         from safetensors.torch import load_file
@@ -166,16 +162,24 @@ def load_model(model_path, base_model_path=None, use_frame_tokens=False):
                 load_frame_gates,
                 patch_lora_with_frame_gating,
             )
+            gate_state = torch.load(gates_path, map_location="cpu")
+            first_gate = next(iter(gate_state.values()), {})
+            uses_semantic_gate = (
+                "anchor_scale" in first_gate
+                or "anchor_basis" in first_gate
+                or "residual.weight" in first_gate
+            )
             patched = patch_lora_with_frame_gating(
                 model,
                 num_frames=len(FRAME_TYPE_TO_ID),
                 dtype=torch.bfloat16,
+                force_semantic_gate=uses_semantic_gate,
             )
             loaded = load_frame_gates(model, model_path)
             model._reframe_uses_frame_gated_lora = True
             print(
                 f"Loaded Frame-Gated LoRA gates: "
-                f"patched={len(patched)}, loaded={loaded}"
+                f"patched={len(patched)}, loaded={loaded}, semantic={uses_semantic_gate}"
             )
         else:
             model = model.merge_and_unload()
@@ -235,13 +239,7 @@ def run_inference(model, processor, images, question, choices=None,
             q_parts.append(token)
 
     if use_frame_prompt and frame_type:
-        FRAME_PROMPTS = {
-            "camera": "Answer the following spatial question from the camera's perspective (i.e., left/right refers to the viewer's left/right as seen in the image).",
-            "person": "Answer the following spatial question from the person's perspective in the scene (i.e., left/right refers to the person's own left/right, which may be opposite to the viewer's).",
-            "object": "Answer the following spatial question relative to the specified reference object's orientation.",
-            "world": "Answer the following spatial question using absolute/world coordinates.",
-        }
-        prompt = FRAME_PROMPTS.get(frame_type, "")
+        prompt = FRAME_TEXT_PROMPTS.get(frame_type, "")
         if prompt:
             q_parts.append(prompt)
 

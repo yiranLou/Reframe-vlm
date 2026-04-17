@@ -24,6 +24,10 @@ from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from peft import LoraConfig, get_peft_model, TaskType
 
 from .frame_embedding import FrameEmbedding, FrameTokenModule
+from .frame_semantics import (
+    build_frame_anchor_vectors,
+    initialize_frame_token_embeddings,
+)
 from .relation_head import RelationHead, FrameCanonicalProjection, TOTAL_RELATION_DIM
 
 
@@ -112,6 +116,7 @@ class ReFrameVLM(nn.Module):
         use_relation_head=True,
         canonical_dim=64,
         use_frame_gated_lora=False,
+        use_semantic_frame_gating=False,
         num_frames=4,
     ):
         super().__init__()
@@ -132,6 +137,7 @@ class ReFrameVLM(nn.Module):
         self.use_frame_tokens = use_frame_tokens
         self.use_relation_head = use_relation_head
         self.use_frame_gated_lora = use_frame_gated_lora
+        self.use_semantic_frame_gating = use_semantic_frame_gating
         self.num_frames = num_frames
 
         # Always create the processor — frame special tokens are opt-in.
@@ -150,6 +156,20 @@ class ReFrameVLM(nn.Module):
                 raise ValueError(
                     f"Could not resolve frame token ids: {self.frame_token_ids}"
                 )
+
+        self.frame_anchor_vectors = None
+        if use_semantic_frame_gating:
+            self.frame_anchor_vectors = build_frame_anchor_vectors(
+                self.processor.tokenizer,
+                self.base_model.get_input_embeddings(),
+            )
+            if use_frame_tokens:
+                initialize_frame_token_embeddings(
+                    self.base_model.get_input_embeddings(),
+                    self.frame_token_ids,
+                    self.frame_anchor_vectors,
+                )
+                print("[Semantic Frame Gating] initialised <frame_*> embeddings from text anchors")
 
         # Apply LoRA
         if lora_config is None:
@@ -181,6 +201,7 @@ class ReFrameVLM(nn.Module):
                 self.base_model,
                 num_frames=num_frames,
                 dtype=torch.bfloat16,
+                semantic_anchor_vectors=self.frame_anchor_vectors,
             )
             print(f"[Frame-Gated LoRA] patched {len(patched)} LoRA layers; "
                   f"gate params = {num_gate_parameters(self.base_model):,}")
@@ -385,6 +406,11 @@ class ReFrameVLM(nn.Module):
             from .frame_lora import save_frame_gates
             n = save_frame_gates(self.base_model, save_dir)
             print(f"[Frame-Gated LoRA] saved {n} gates to {save_dir}")
+        if self.use_semantic_frame_gating and self.frame_anchor_vectors is not None:
+            torch.save(
+                {"anchor_vectors": self.frame_anchor_vectors.cpu()},
+                os.path.join(save_dir, "frame_semantics.pt"),
+            )
 
     def load_auxiliary_modules(self, save_dir):
         """Load non-LoRA trainable modules."""
@@ -406,6 +432,11 @@ class ReFrameVLM(nn.Module):
             from .frame_lora import load_frame_gates
             n = load_frame_gates(self.base_model, save_dir)
             print(f"[Frame-Gated LoRA] loaded {n} gates from {save_dir}")
+
+        sem_path = os.path.join(save_dir, "frame_semantics.pt")
+        if os.path.exists(sem_path):
+            payload = torch.load(sem_path, map_location="cpu")
+            self.frame_anchor_vectors = payload.get("anchor_vectors")
 
 
 def build_model(

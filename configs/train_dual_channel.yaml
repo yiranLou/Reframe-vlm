@@ -1,0 +1,40 @@
+# Dual-channel conditioning baseline: learned <frame_*> token +
+# natural-language frame instruction. This isolates whether combining
+# input-space symbolic and linguistic conditioning is already enough.
+
+mode: frame
+model_path: models/qwen25-vl-7b
+train_data: data/processed/train.jsonl
+output_dir: checkpoints/dual_channel_lora
+
+# LoRA
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+
+# Dual-channel frame conditioning
+use_frame_tokens: true
+use_frame_text_prompt: true
+
+# Training — match one-epoch comparison recipe
+num_epochs: 1
+batch_size: 4
+gradient_accumulation: 16
+learning_rate: 2.0e-5
+scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_length: 768
+
+# Hardware
+bf16: true
+gradient_checkpointing: true
+num_workers: 4
+
+# Logging
+logging_steps: 10
+save_strategy: epoch
+save_total_limit: 1
+report_to: wandb
+run_name: reframe_dual_channel_lora
+seed: 42

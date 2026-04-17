@@ -43,6 +43,8 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from .frame_semantics import resize_anchor_vectors
+
 
 NUM_FRAMES = 4   # camera, person, object, world
 
@@ -71,6 +73,45 @@ class FrameGateEmbedding(nn.Module):
             ``(batch, out_features)`` in roughly ``[0, 2]``.
         """
         return 1.0 + torch.tanh(self.emb(frame_type_ids))
+
+class SemanticResidualFrameGate(nn.Module):
+    """Semantically anchored frame gate with residual adaptation.
+
+    The gate decomposes into a fixed semantic anchor basis derived from the
+    natural-language frame instructions and a learned per-frame residual:
+
+        g_{l,f} = 1 + tanh(s_l ⊙ π_l(a_f) + r_{l,f})
+
+    where ``π_l`` is a parameter-free resize into the layer width, ``s_l`` is a
+    learnable layer-specific mixing vector initialised at zero, and ``r_{l,f}``
+    is a learnable per-frame residual initialised at zero. At initialisation we
+    recover standard LoRA exactly.
+    """
+
+    def __init__(
+        self,
+        num_frames: int,
+        out_features: int,
+        anchor_vectors: torch.Tensor | None = None,
+    ):
+        super().__init__()
+        self.num_frames = num_frames
+        self.out_features = out_features
+        if anchor_vectors is None:
+            anchor_basis = torch.zeros(num_frames, out_features, dtype=torch.float32)
+        else:
+            anchor_basis = resize_anchor_vectors(anchor_vectors, out_features)
+        self.register_buffer("anchor_basis", anchor_basis)
+        self.anchor_scale = nn.Parameter(torch.zeros(out_features))
+        self.residual = nn.Embedding(num_frames, out_features)
+        nn.init.zeros_(self.residual.weight)
+
+    def forward(self, frame_type_ids: torch.Tensor) -> torch.Tensor:
+        anchors = self.anchor_basis.index_select(0, frame_type_ids)
+        anchors = anchors.to(self.anchor_scale.dtype)
+        residual = self.residual(frame_type_ids)
+        logits = anchors * self.anchor_scale.unsqueeze(0) + residual
+        return 1.0 + torch.tanh(logits)
 
 
 # ── Patched forward ──────────────────────────────────────────────────────
@@ -152,6 +193,8 @@ def patch_lora_with_frame_gating(
     peft_model: nn.Module,
     num_frames: int = NUM_FRAMES,
     dtype: Optional[torch.dtype] = None,
+    semantic_anchor_vectors: Optional[torch.Tensor] = None,
+    force_semantic_gate: bool = False,
     skip_name_substrings: Tuple[str, ...] = (
         "visual",
         "vision",
@@ -179,7 +222,16 @@ def patch_lora_with_frame_gating(
         if hasattr(mod, "frame_gate"):
             continue  # already patched
         out_features = mod.base_layer.out_features
-        gate = FrameGateEmbedding(num_frames, out_features)
+        use_semantic_gate = force_semantic_gate or semantic_anchor_vectors is not None
+        if use_semantic_gate:
+            gate = SemanticResidualFrameGate(
+                num_frames,
+                out_features,
+                anchor_vectors=semantic_anchor_vectors,
+            )
+        else:
+            gate = FrameGateEmbedding(num_frames, out_features)
+        gate = gate.to(device=mod.base_layer.weight.device)
         if dtype is not None:
             gate = gate.to(dtype=dtype)
         mod.frame_gate = gate

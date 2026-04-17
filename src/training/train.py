@@ -169,6 +169,7 @@ def train_frame(config):
         processor=model.processor,
         max_length=config.get("max_length", 2048),
         use_frame_tokens=use_frame_tokens,
+        use_frame_text_prompt=config.get("use_frame_text_prompt", False),
     )
 
     training_args = build_training_args(config)
@@ -209,6 +210,7 @@ def train_frame_gated(config):
         use_frame_tokens=False,
         use_relation_head=False,
         use_frame_gated_lora=True,
+        use_semantic_frame_gating=config.get("use_semantic_frame_gating", False),
     )
 
     dataset = ReFrameDataset(
@@ -221,7 +223,7 @@ def train_frame_gated(config):
         processor=model.processor,
         max_length=config.get("max_length", 512),
         use_frame_tokens=False,
-        use_frame_text_prompt=False,
+        use_frame_text_prompt=config.get("use_frame_text_prompt", False),
     )
 
     training_args = build_training_args(config)
@@ -259,6 +261,7 @@ def train_token_gated(config):
         use_frame_tokens=use_frame_tokens,
         use_relation_head=False,
         use_frame_gated_lora=True,
+        use_semantic_frame_gating=config.get("use_semantic_frame_gating", False),
     )
 
     dataset = ReFrameDataset(
@@ -271,7 +274,7 @@ def train_token_gated(config):
         processor=model.processor,
         max_length=config.get("max_length", 640),
         use_frame_tokens=use_frame_tokens,
-        use_frame_text_prompt=False,
+        use_frame_text_prompt=config.get("use_frame_text_prompt", False),
     )
 
     training_args = build_training_args(config)
